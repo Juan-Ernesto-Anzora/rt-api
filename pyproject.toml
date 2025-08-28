@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "rt-api"
+version = "0.1.0"
+description = "Request Tracker API (Django + DRF)"
+authors = ["you <you@example.com>"]
+packages = [{ include = "rt_api" }, { include = "apps" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+Django = "^5.0"
+djangorestframework = "^3.15"
+drf-spectacular = "^0.27.2"
+djangorestframework-simplejwt = "^5.3.1"
+mssql-django = "^1.5.0"
+pyodbc = "^5.1.0"
+django-cors-headers = "^4.4.0"
+boto3 = "^1.34.0"
+python-dotenv = "^1.0.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-django = "^4.8.0"
+Model-Bakery = "^1.18.0"
+black = "^24.3.0"
+ruff = "^0.5.4"
+isort = "^5.13.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
