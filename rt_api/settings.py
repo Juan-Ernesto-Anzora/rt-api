@@ -4,7 +4,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret-key-change-me")
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "srctpassW12345")
 DEBUG = os.getenv("DEBUG", "1") == "1"
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",")
 
@@ -15,11 +15,9 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-
     "corsheaders",
     "rest_framework",
     "drf_spectacular",
-
     "apps.common",
 ]
 
@@ -72,7 +70,8 @@ DATABASES = {
         "PORT": DB_PORT,
         "OPTIONS": {
             "driver": DB_DRIVER,
-            "trustServerCertificate": "yes",
+            # "trustServerCertificate": "yes",
+            "extra_params": "Encrypt=yes;TrustServerCertificate=yes;",
         },
     }
 }
@@ -111,4 +110,6 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minio12345")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "rt-attachments")
 MINIO_REGION = os.getenv("MINIO_REGION", "us-east-1")
 
-CSRF_TRUSTED_ORIGINS = os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(",")
+CSRF_TRUSTED_ORIGINS = os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(
+    ","
+)
