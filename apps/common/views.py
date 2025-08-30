@@ -1,16 +1,20 @@
 import uuid
+
 import boto3
 from botocore.client import Config
 from django.conf import settings
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import status
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
 
 class HealthView(APIView):
     permission_classes = [AllowAny]
+
     def get(self, request):
         return Response({"status": "ok"}, status=status.HTTP_200_OK)
+
 
 class PresignUploadView(APIView):
     permission_classes = [IsAuthenticated]
@@ -40,4 +44,11 @@ class PresignUploadView(APIView):
             },
             ExpiresIn=3600,
         )
-        return Response({"url": url, "method": "PUT", "headers": {"Content-Type": content_type}, "object_key": key})
+        return Response(
+            {
+                "url": url,
+                "method": "PUT",
+                "headers": {"Content-Type": content_type},
+                "object_key": key,
+            }
+        )

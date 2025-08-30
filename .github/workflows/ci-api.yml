@@ -1,0 +1,38 @@
+name: ci-api
+on:
+  pull_request:
+    paths:
+      - "**.py"
+      - ".github/workflows/ci-api.yml"
+      - "pyproject.toml"
+      - "poetry.lock"
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install deps
+        run: poetry install --no-interaction --no-root
+
+      - name: Ruff (lint)
+        run: poetry run ruff check .
+
+      - name: isort (check)
+        run: poetry run isort . --check --diff
+
+      - name: Black (check)
+        run: poetry run black . --check
+
+      - name: PyTest (unit only)
+        run: poetry run pytest -q
