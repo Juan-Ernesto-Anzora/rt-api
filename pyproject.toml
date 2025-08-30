@@ -40,6 +40,12 @@ skip_gitignore = true
 [tool.ruff]
 line-length = 88
 
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "rt_api.settings"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
