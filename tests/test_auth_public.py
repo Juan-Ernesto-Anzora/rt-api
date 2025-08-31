@@ -1,5 +1,6 @@
 from django.test import Client
 
+
 def test_docs_is_public():
     c = Client()
     resp = c.get("/api/docs")
