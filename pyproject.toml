@@ -39,6 +39,8 @@ skip_gitignore = true
 
 [tool.ruff]
 line-length = 88
+[tool.ruff.lint]
+extend-ignore = ["I001"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "rt_api.settings"

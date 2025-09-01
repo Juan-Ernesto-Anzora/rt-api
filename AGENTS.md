@@ -18,7 +18,7 @@
 - **Status colors**: open/indigo, in-progress/indigo, waiting/amber, closed/neutral (see UI kit).
 
 ## 3. UI conventions
-- **Global app bar**: left = product name; right = **user menu** (avatar/name).  
+- **Global app bar**: left = product name; right = **user menu** (avatar/name).
   - Menu items (initial set): **Profile & Preferences**, **Keyboard Shortcuts**, **Saved Views**, **Notifications**, **Switch Company/Tenant**, **Log out**.
 - **Left rail**: New Request, My Tasks, Other Tasks, My Requests, Search, Settings.
 - **Tables**: left-aligned text, fixed header, zebra rows off, hover highlight on, 48px row height.
@@ -46,11 +46,11 @@
 
 ## 7. Git & branching (trunk-based)
 - Default branch: `main` (protected).
-- Branch from `main` using:  
-  - `feat/<scope>-<short-desc>` new feature  
-  - `fix/<scope>-<short-desc>` bugfix  
-  - `chore/<scope>-<short-desc>` tooling or infrastructure  
-  - `docs/<scope>-<short-desc>` docs only  
+- Branch from `main` using:
+  - `feat/<scope>-<short-desc>` new feature
+  - `fix/<scope>-<short-desc>` bugfix
+  - `chore/<scope>-<short-desc>` tooling or infrastructure
+  - `docs/<scope>-<short-desc>` docs only
   - `refactor/<scope>-<short-desc>` behavior-preserving changes
 - Keep PRs **small** (≤ 400 lines changed ideally). Larger changes must be split.
 
@@ -58,8 +58,8 @@
 - Format: `<type>(<scope>): <short summary>`
 - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 - Add `!` for breaking changes, describe them in the body.
-- Examples:  
-  - `feat(requests): add grouped multi-file upload`  
+- Examples:
+  - `feat(requests): add grouped multi-file upload`
   - `fix(search): escape special chars in FTS query`
 
 ## 9. Pull requests
@@ -84,12 +84,12 @@
 - Run web: `pnpm dev` (or `npm run dev`). Run API: `poetry run python manage.py runserver`.
 
 ## 12. Agent workflow (how to operate)
-1) Read **this file end-to-end** and the current ticket.  
-2) Propose a short plan with acceptance criteria.  
-3) Update the OpenAPI or design tokens **first** if needed.  
-4) Implement incrementally, write tests as you go.  
-5) Run full lint+test locally.  
-6) Open a small PR with clear title/body and checklist.  
+1) Read **this file end-to-end** and the current ticket.
+2) Propose a short plan with acceptance criteria.
+3) Update the OpenAPI or design tokens **first** if needed.
+4) Implement incrementally, write tests as you go.
+5) Run full lint+test locally.
+6) Open a small PR with clear title/body and checklist.
 7) Respond to review feedback and keep the PR up to date with `main`.
 
 ## 13. Ownership
