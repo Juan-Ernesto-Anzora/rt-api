@@ -1,16 +1,77 @@
+# .pre-commit-config.yaml (rt-api-skeleton)
+# Ejecuta: poetry run pre-commit install
+# Opcional: poetry run pre-commit run -a   # para verificar todo el repo
+
 repos:
-  - repo: https://github.com/psf/black
-    rev: 24.3.0
-    hooks: [ { id: black } ]
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.5.4
-    hooks: [ { id: ruff, args: ["--fix"] } ]
+  # 1) Ordena imports (alineado con Black)
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
-    hooks: [ { id: isort } ]
+    hooks:
+      - id: isort
+        args: ["--profile=black"]
+        files: "\\.(py)$"
+        exclude: >
+          (?x)^(
+            .venv/|
+            venv/|
+            env/|
+            node_modules/|
+            dist/|
+            build/|
+            .mypy_cache/|
+            .pytest_cache/|
+            .ruff_cache/
+          )
+
+  # 2) Formatea código
+  - repo: https://github.com/psf/black
+    rev: 24.3.0
+    hooks:
+      - id: black
+        files: "\\.(py)$"
+        exclude: >
+          (?x)^(
+            .venv/|
+            venv/|
+            env/|
+            node_modules/|
+            dist/|
+            build/|
+            .mypy_cache/|
+            .pytest_cache/|
+            .ruff_cache/
+          )
+
+  # 3) Linter ultra-rápido (con autofix)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.4
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+        files: "\\.(py)$"
+        exclude: >
+          (?x)^(
+            .venv/|
+            venv/|
+            env/|
+            node_modules/|
+            dist/|
+            build/|
+            .mypy_cache/|
+            .pytest_cache/|
+            .ruff_cache/
+          )
+
+  # 4) Utilidades genéricas
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
       - id: check-merge-conflict
       - id: end-of-file-fixer
       - id: trailing-whitespace
+        exclude: >
+          (?x)^(
+            dist/|
+            build/|
+            node_modules/
+          )
