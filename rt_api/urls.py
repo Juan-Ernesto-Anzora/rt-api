@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.urls import path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from rest_framework.routers import SimpleRouter
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
@@ -8,6 +9,7 @@ from rest_framework_simplejwt.views import (
 )
 
 from apps.common import views as common_views
+from apps.rt.views import AttachmentViewSet, CommentViewSet, RequestViewSet
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -23,5 +25,27 @@ urlpatterns = [
     path("api/schema", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/docs", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"
+    ),
+]
+
+router = SimpleRouter()
+router.register(r"api/requests", RequestViewSet, basename="requests")
+
+urlpatterns += router.urls
+
+# nested: /api/requests/<id>/comments y /attachments
+request_comments = CommentViewSet.as_view({"get": "list", "post": "create"})
+request_attachments = AttachmentViewSet.as_view({"get": "list"})
+
+urlpatterns += [
+    path(
+        "api/requests/<uuid:request_pk>/comments",
+        request_comments,
+        name="request-comments",
+    ),
+    path(
+        "api/requests/<uuid:request_pk>/attachments",
+        request_attachments,
+        name="request-attachments",
     ),
 ]

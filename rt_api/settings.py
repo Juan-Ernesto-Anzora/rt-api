@@ -20,6 +20,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "apps.common",
     "apps.core",
+    "apps.rt",
 ]
 
 MIDDLEWARE = [
@@ -116,3 +117,9 @@ MINIO_REGION = os.getenv("MINIO_REGION", "us-east-1")
 CSRF_TRUSTED_ORIGINS = os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(
     ","
 )
+
+LOGGING = {
+    "version": 1,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "loggers": {"django.db.backends": {"handlers": ["console"], "level": "DEBUG"}},
+}
