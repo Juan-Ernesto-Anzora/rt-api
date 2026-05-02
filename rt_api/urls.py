@@ -9,7 +9,13 @@ from rest_framework_simplejwt.views import (
 )
 
 from apps.common import views as common_views
-from apps.rt.views import AttachmentViewSet, CommentViewSet, RequestViewSet
+from apps.rt.views import (
+    AttachmentFinalizeView,
+    AttachmentInitView,
+    AttachmentViewSet,
+    CommentViewSet,
+    RequestViewSet,
+)
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -21,6 +27,16 @@ urlpatterns = [
         "api/storage/presign",
         common_views.PresignUploadView.as_view(),
         name="storage-presign",
+    ),
+    path(
+        "api/attachments/init",
+        AttachmentInitView.as_view(),
+        name="attachments-init",
+    ),
+    path(
+        "api/attachments/finalize",
+        AttachmentFinalizeView.as_view(),
+        name="attachments-finalize",
     ),
     path("api/schema", SpectacularAPIView.as_view(), name="schema"),
     path(
