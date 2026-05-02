@@ -17,6 +17,8 @@ poetry run python manage.py runserver 0.0.0.0:8000
 - `POST /api/auth/jwt/verify`
 - `GET /api/docs` (Swagger UI)
 - `POST /api/storage/presign` (JWT required) body: `{ "filename": "a.png", "content_type": "image/png" }`
+- `POST /api/attachments/init` (JWT + `X-Tenant` required) body: `{ "request_id": "<uuid>", "files": [{ "filename": "a.png", "content_type": "image/png" }] }`
+- `POST /api/attachments/finalize` (JWT + `X-Tenant` required) creates one grouped comment bubble plus attachment rows with `scanstatus=pending`
 
 ## Notes
 - DB: SQL Server via `mssql-django` + `pyodbc`. Update env for your instance.
