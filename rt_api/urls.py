@@ -15,6 +15,7 @@ from apps.rt.views import (
     AttachmentViewSet,
     CommentViewSet,
     RequestViewSet,
+    SearchView,
 )
 
 urlpatterns = [
@@ -38,6 +39,7 @@ urlpatterns = [
         AttachmentFinalizeView.as_view(),
         name="attachments-finalize",
     ),
+    path("api/search", SearchView.as_view(), name="search"),
     path("api/schema", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/docs", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"
