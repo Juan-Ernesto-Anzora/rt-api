@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Activity, Attachment, Comment, Request
+from .search import SearchValidationError, search_requests
 from .serializers import (
     ActivitySerializer,
     AttachmentFinalizeRequestSerializer,
@@ -22,6 +23,7 @@ from .serializers import (
     AttachmentSerializer,
     CommentSerializer,
     RequestSerializer,
+    SearchQuerySerializer,
 )
 
 
@@ -284,6 +286,60 @@ class AttachmentFinalizeView(APIView):
             },
             status=201,
         )
+
+
+class SearchView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = SearchQuerySerializer(data=request.query_params)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "code": "validation_error",
+                    "message": "Invalid search query.",
+                    "details": serializer.errors,
+                },
+                status=400,
+            )
+
+        tenant_id = getattr(request, "tenant_id", None)
+        if not tenant_id:
+            return Response(
+                {
+                    "code": "tenant_required",
+                    "message": "Tenant context missing.",
+                    "details": [],
+                },
+                status=400,
+            )
+
+        data = serializer.validated_data
+        try:
+            results = search_requests(
+                tenant_id=tenant_id,
+                raw_query=data["q"],
+                page=data["page"],
+                page_size=data["page_size"],
+                types=data.get("types"),
+                status_id=data.get("status_id"),
+                assignee_id=data.get("assignee_id"),
+                flow_id=data.get("flow_id"),
+                created_from=data.get("created_from"),
+                created_to=data.get("created_to"),
+                updated_from=data.get("updated_from"),
+                updated_to=data.get("updated_to"),
+            )
+        except SearchValidationError as exc:
+            return Response(
+                {
+                    "code": "validation_error",
+                    "message": str(exc),
+                    "details": [],
+                },
+                status=400,
+            )
+        return Response(results)
 
 
 def build_storage_url(object_key):

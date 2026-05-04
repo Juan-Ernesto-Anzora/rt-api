@@ -127,3 +127,19 @@ class ActivitySerializer(serializers.ModelSerializer):
     class Meta:
         model = Activity
         fields = ["activityid", "requestid", "actorid", "type", "payload", "createdat"]
+
+
+class SearchQuerySerializer(serializers.Serializer):
+    q = serializers.CharField(max_length=200, trim_whitespace=True)
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    page_size = serializers.IntegerField(
+        required=False, min_value=1, max_value=100, default=25
+    )
+    types = serializers.CharField(required=False, allow_blank=True)
+    status_id = serializers.UUIDField(required=False)
+    assignee_id = serializers.UUIDField(required=False)
+    flow_id = serializers.UUIDField(required=False)
+    created_from = serializers.DateTimeField(required=False)
+    created_to = serializers.DateTimeField(required=False)
+    updated_from = serializers.DateTimeField(required=False)
+    updated_to = serializers.DateTimeField(required=False)

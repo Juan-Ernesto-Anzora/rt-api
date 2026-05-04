@@ -19,6 +19,7 @@ poetry run python manage.py runserver 0.0.0.0:8000
 - `POST /api/storage/presign` (JWT required) body: `{ "filename": "a.png", "content_type": "image/png" }`
 - `POST /api/attachments/init` (JWT + `X-Tenant` required) body: `{ "request_id": "<uuid>", "files": [{ "filename": "a.png", "content_type": "image/png" }] }`
 - `POST /api/attachments/finalize` (JWT + `X-Tenant` required) creates one grouped comment bubble plus attachment rows with `scanstatus=pending`
+- `GET /api/search?q=password` (JWT + `X-Tenant` required) searches request title/description, comment text, and attachment filenames with SQL Server Full-Text Search. Supports `types`, `status_id`, `assignee_id`, `flow_id`, `created_from`, `created_to`, `updated_from`, `updated_to`, `page`, and `page_size`.
 
 ## Notes
 - DB: SQL Server via `mssql-django` + `pyodbc`. Update env for your instance.
