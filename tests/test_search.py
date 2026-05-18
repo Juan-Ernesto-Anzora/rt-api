@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from django.urls import resolve
 
 from apps.rt.search import SearchValidationError, build_fts_query, search_requests
 from apps.rt.views import SearchView
@@ -26,6 +27,12 @@ class FakeCursor:
 
     def fetchall(self):
         return self.rows
+
+
+def test_search_requests_postman_route_alias_resolves():
+    match = resolve("/api/search/requests")
+
+    assert match.url_name == "search-requests"
 
 
 def test_build_fts_query_uses_prefix_terms_and_strips_symbols():
@@ -80,8 +87,9 @@ def test_search_requests_builds_tenant_scoped_combined_fts_sql(monkeypatch):
     assert "FROM dbo.Request r" in fake_cursor.sql
     assert "FROM dbo.Attachment a" in fake_cursor.sql
     assert "FROM dbo.Comment c" not in fake_cursor.sql
-    assert "CONTAINS((r.Title, r.Description), %s)" in fake_cursor.sql
-    assert "CONTAINS(a.Filename, %s)" in fake_cursor.sql
+    assert fake_cursor.sql.lstrip().startswith(";WITH matched AS")
+    assert "CONTAINS((Title, Description), %s)" in fake_cursor.sql
+    assert "CONTAINS(Filename, %s)" in fake_cursor.sql
     assert fake_cursor.sql.count("r.TenantId = %s") == 1
     assert fake_cursor.sql.count("a.TenantId = %s") == 1
     assert str(tenant_id) in fake_cursor.params

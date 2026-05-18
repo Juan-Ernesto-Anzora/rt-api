@@ -136,6 +136,7 @@ def test_attachment_finalize_creates_one_comment_and_grouped_attachments(monkeyp
     assert response.data["group_id"] == str(group_id)
     assert response.data["comment_id"] == str(comment.commentid)
     assert len(response.data["attachments"]) == 2
+    assert isinstance(created_comments[0]["commentid"], uuid.UUID)
     assert created_comments[0]["groupid"] == str(group_id)
     assert created_comments[0]["messagemd"] == "Uploaded two files"
     assert len(created_attachments) == 2
@@ -145,3 +146,63 @@ def test_attachment_finalize_creates_one_comment_and_grouped_attachments(monkeyp
         f"rt-attachments/uploads/{group_id}/screen.png"
     )
     assert created_activities[0]["type"] == "attachments.finalized"
+
+
+def test_attachment_finalize_accepts_postman_object_payload(monkeypatch):
+    tenant_id = uuid.uuid4()
+    request_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    tenant = Tenant(tenantid=tenant_id)
+    requester = User(userid=uuid.uuid4())
+    rt_request = Request(
+        requestid=request_id,
+        tenantid=tenant,
+        humanid="RT-2026-000001",
+        title="Postman upload test",
+        flowid=Flow(flowid=uuid.uuid4(), tenantid=tenant),
+        statusid=Status(statusid=uuid.uuid4(), tenantid=tenant),
+        priority="normal",
+        requesterid=requester,
+    )
+    comment = Comment(commentid=uuid.uuid4())
+    created_comments = []
+    created_attachments = []
+
+    monkeypatch.setattr(
+        "apps.rt.views.Request.objects.get",
+        lambda **kwargs: rt_request,
+    )
+    monkeypatch.setattr(
+        "apps.rt.views.Comment.objects.create",
+        lambda **kwargs: created_comments.append(kwargs) or comment,
+    )
+    monkeypatch.setattr(
+        "apps.rt.views.Attachment.objects.bulk_create",
+        lambda attachments: created_attachments.extend(attachments),
+    )
+    monkeypatch.setattr("apps.rt.views.Activity.objects.create", lambda **kwargs: None)
+
+    request = SimpleNamespace(
+        tenant_id=tenant_id,
+        data={
+            "request_id": str(request_id),
+            "group_id": str(group_id),
+            "comment_markdown": "Finalized Postman upload.",
+            "objects": [
+                {
+                    "object_key": f"uploads/{group_id}/postman-vpn-smoke.txt",
+                    "filename": "postman-vpn-smoke.txt",
+                    "content_type": "text/plain",
+                    "size_bytes": 128,
+                }
+            ],
+            "idempotency_key": "postman-finalize-123",
+        },
+    )
+    post = AttachmentFinalizeView.post.__wrapped__
+
+    response = post(AttachmentFinalizeView(), request)
+
+    assert response.status_code == 201
+    assert created_comments[0]["messagemd"] == "Finalized Postman upload."
+    assert created_attachments[0].filename == "postman-vpn-smoke.txt"

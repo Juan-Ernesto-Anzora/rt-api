@@ -40,6 +40,7 @@ urlpatterns = [
         name="attachments-finalize",
     ),
     path("api/search", SearchView.as_view(), name="search"),
+    path("api/search/requests", SearchView.as_view(), name="search-requests"),
     path("api/schema", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/docs", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"
@@ -57,12 +58,12 @@ request_attachments = AttachmentViewSet.as_view({"get": "list"})
 
 urlpatterns += [
     path(
-        "api/requests/<uuid:request_pk>/comments",
+        "api/requests/<str:request_pk>/comments",
         request_comments,
         name="request-comments",
     ),
     path(
-        "api/requests/<uuid:request_pk>/attachments",
+        "api/requests/<str:request_pk>/attachments",
         request_attachments,
         name="request-attachments",
     ),

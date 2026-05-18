@@ -88,7 +88,7 @@ def search_requests(
                 30 AS MatchRank
             FROM dbo.Request r
             WHERE r.TenantId = %s
-              AND CONTAINS((r.Title, r.Description), %s)
+              AND CONTAINS((Title, Description), %s)
               {filters}
             """
         )
@@ -114,7 +114,7 @@ def search_requests(
               ON r.RequestId = c.RequestId
              AND r.TenantId = c.TenantId
             WHERE c.TenantId = %s
-              AND CONTAINS(c.MessageMd, %s)
+              AND CONTAINS(MessageMd, %s)
               {filters}
             """
         )
@@ -140,14 +140,14 @@ def search_requests(
               ON r.RequestId = a.RequestId
              AND r.TenantId = a.TenantId
             WHERE a.TenantId = %s
-              AND CONTAINS(a.Filename, %s)
+              AND CONTAINS(Filename, %s)
               {filters}
             """
         )
         params.extend([str(tenant_id), fts_query, *filter_params])
 
     sql = f"""
-    WITH matched AS (
+    ;WITH matched AS (
         {" UNION ALL ".join(selects)}
     ),
     grouped AS (

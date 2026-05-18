@@ -9,6 +9,7 @@ from django.db import connection, transaction
 from django.utils import timezone
 from rest_framework import mixins, permissions, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -94,24 +95,47 @@ class CommentViewSet(
     permission_classes = [TenantPermission]
     serializer_class = CommentSerializer
 
+    def get_request_uuid(self):
+        request_id = self.kwargs.get("request_pk")
+        try:
+            return uuid.UUID(str(request_id))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                {
+                    "code": "validation_error",
+                    "message": "Invalid request id.",
+                    "details": [{"field": "request_id", "message": "Invalid UUID."}],
+                }
+            ) from exc
+
+    def get_request(self):
+        request_id = self.get_request_uuid()
+        tenant_id = self.request.tenant_id
+        try:
+            return Request.objects.get(requestid=request_id, tenantid=tenant_id)
+        except Request.DoesNotExist as exc:
+            raise NotFound(
+                {
+                    "code": "not_found",
+                    "message": "Request not found for this tenant.",
+                    "details": [],
+                }
+            ) from exc
+
     def get_queryset(self):
         tenant_id = self.request.tenant_id
-        request_id = self.kwargs.get("request_pk")
+        request_id = self.get_request_uuid()
         return Comment.objects.filter(
             tenantid=tenant_id, requestid=request_id
         ).order_by("-createdat")
 
     def perform_create(self, serializer):
-        tenant_id = self.request.tenant_id
-        request_id = self.kwargs.get("request_pk")
-        if isinstance(tenant_id, str):
-            tenant_id = uuid.UUID(tenant_id)
-        if isinstance(request_id, str):
-            request_id = uuid.UUID(request_id)
+        req = self.get_request()
         serializer.save(
-            tenantid_id=tenant_id,
-            requestid_id=request_id,
-            authorid=str(self.request.user.id),
+            commentid=uuid.uuid4(),
+            tenantid=req.tenantid,
+            requestid=req,
+            authorid=req.requesterid,
             createdat=timezone.now(),
         )
 
@@ -120,9 +144,22 @@ class AttachmentViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     permission_classes = [TenantPermission]
     serializer_class = AttachmentSerializer
 
+    def get_request_uuid(self):
+        request_id = self.kwargs.get("request_pk")
+        try:
+            return uuid.UUID(str(request_id))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                {
+                    "code": "validation_error",
+                    "message": "Invalid request id.",
+                    "details": [{"field": "request_id", "message": "Invalid UUID."}],
+                }
+            ) from exc
+
     def get_queryset(self):
         tenant_id = self.request.tenant_id
-        request_id = self.kwargs.get("request_pk")
+        request_id = self.get_request_uuid()
         return Attachment.objects.filter(
             tenantid=tenant_id, requestid=request_id
         ).order_by("-createdat")
@@ -223,6 +260,7 @@ class AttachmentFinalizeView(APIView):
         # Use the request owner until auth_user -> dbo.User mapping exists.
         author = req.requesterid
         comment = Comment.objects.create(
+            commentid=uuid.uuid4(),
             tenantid=req.tenantid,
             requestid=req,
             authorid=author,
