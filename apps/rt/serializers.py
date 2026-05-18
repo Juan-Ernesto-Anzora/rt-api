@@ -46,6 +46,11 @@ class RequestSerializer(serializers.ModelSerializer):
 
 
 class CommentSerializer(serializers.ModelSerializer):
+    body = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    message = serializers.CharField(source="messagemd", read_only=True)
+    visibility = serializers.CharField(required=False, allow_blank=True)
+    messagemd = serializers.CharField(required=False, allow_blank=True)
+
     class Meta:
         model = Comment
         fields = [
@@ -53,9 +58,20 @@ class CommentSerializer(serializers.ModelSerializer):
             "requestid",
             "authorid",
             "messagemd",
+            "message",
+            "body",
             "visibility",
             "createdat",
         ]
+        read_only_fields = ["commentid", "requestid", "authorid", "createdat"]
+
+    def validate(self, attrs):
+        body = attrs.pop("body", None)
+        if body is not None and "messagemd" not in attrs:
+            attrs["messagemd"] = body
+        attrs.setdefault("messagemd", "")
+        attrs.setdefault("visibility", "public")
+        return attrs
 
 
 class AttachmentSerializer(serializers.ModelSerializer):
@@ -120,7 +136,30 @@ class AttachmentFinalizeRequestSerializer(serializers.Serializer):
     request_id = serializers.UUIDField()
     group_id = serializers.UUIDField()
     message = serializers.CharField(allow_blank=True, required=False)
-    files = AttachmentFinalizeFileSerializer(many=True, allow_empty=False)
+    comment_markdown = serializers.CharField(
+        allow_blank=True, required=False, write_only=True
+    )
+    files = AttachmentFinalizeFileSerializer(
+        many=True, allow_empty=False, required=False
+    )
+    objects = AttachmentFinalizeFileSerializer(
+        many=True, allow_empty=False, required=False, write_only=True
+    )
+    idempotency_key = serializers.CharField(
+        max_length=120, required=False, allow_blank=True
+    )
+
+    def validate(self, attrs):
+        objects = attrs.pop("objects", None)
+        comment_markdown = attrs.pop("comment_markdown", None)
+        if "files" not in attrs and objects is not None:
+            attrs["files"] = objects
+        if "message" not in attrs and comment_markdown is not None:
+            attrs["message"] = comment_markdown
+        if "files" not in attrs:
+            raise serializers.ValidationError({"files": ["This field is required."]})
+        attrs.setdefault("message", "")
+        return attrs
 
 
 class ActivitySerializer(serializers.ModelSerializer):

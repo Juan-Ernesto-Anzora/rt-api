@@ -25,3 +25,12 @@ poetry run python manage.py runserver 0.0.0.0:8000
 - DB: SQL Server via `mssql-django` + `pyodbc`. Update env for your instance.
 - MinIO: pre-signed PUT URLs using boto3 S3 client.
 - CORS: open in dev; tighten later.
+
+## Sprint 1 Smoke Test
+1. Start API
+2. Login
+3. Set TOKEN
+4. Create request
+5. Add comment
+6. Upload attachments
+7. Search
