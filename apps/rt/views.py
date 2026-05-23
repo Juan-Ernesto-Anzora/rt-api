@@ -23,6 +23,7 @@ from .serializers import (
     AttachmentInitResponseSerializer,
     AttachmentSerializer,
     CommentSerializer,
+    RequestDetailSerializer,
     RequestSerializer,
     SearchQuerySerializer,
 )
@@ -47,6 +48,18 @@ class BaseTenantViewSet(viewsets.ModelViewSet):
 class RequestViewSet(BaseTenantViewSet):
     queryset = Request.objects.all().order_by("-updatedat")
     serializer_class = RequestSerializer
+
+    def get_queryset(self):
+        return (
+            super()
+            .get_queryset()
+            .select_related("flowid", "statusid", "requesterid", "assigneeid")
+        )
+
+    def get_serializer_class(self):
+        if self.action in {"retrieve", "detail_bundle"}:
+            return RequestDetailSerializer
+        return super().get_serializer_class()
 
     def perform_create(self, serializer):
         validated_data = serializer.validated_data
@@ -82,10 +95,40 @@ class RequestViewSet(BaseTenantViewSet):
 
     @action(detail=True, methods=["get"])
     def activity(self, request, pk=None):
+        return self._activity_response(request, pk)
+
+    @action(detail=True, methods=["get"], url_path="activities")
+    def activities(self, request, pk=None):
+        return self._activity_response(request, pk)
+
+    @action(detail=True, methods=["get"], url_path="detail")
+    def detail_bundle(self, request, pk=None):
+        rt_request = self.get_object()
         tenant_id = request.tenant_id
-        items = Activity.objects.filter(tenantid=tenant_id, requestid=pk).order_by(
-            "-createdat"
+        comments = Comment.objects.filter(
+            tenantid=tenant_id, requestid=rt_request.requestid
+        ).order_by("-createdat")
+        attachments = Attachment.objects.filter(
+            tenantid=tenant_id, requestid=rt_request.requestid
+        ).order_by("-createdat")
+        activity = Activity.objects.filter(
+            tenantid=tenant_id, requestid=rt_request.requestid
+        ).order_by("-createdat")
+        return Response(
+            {
+                "request": RequestDetailSerializer(rt_request).data,
+                "comments": CommentSerializer(comments, many=True).data,
+                "attachments": AttachmentSerializer(attachments, many=True).data,
+                "activity": ActivitySerializer(activity, many=True).data,
+            }
         )
+
+    def _activity_response(self, request, pk=None):
+        rt_request = self.get_object()
+        tenant_id = request.tenant_id
+        items = Activity.objects.filter(
+            tenantid=tenant_id, requestid=rt_request.requestid
+        ).order_by("-createdat")
         return Response(ActivitySerializer(items, many=True).data)
 
 

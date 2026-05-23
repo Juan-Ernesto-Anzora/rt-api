@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Activity, Attachment, Comment, Request
+from .models import Activity, Attachment, Comment, Flow, Request, Status, User
 
 # No necesitas importar Flow, Status, User aquí si usas UUIDField
 # from .models import Flow, Status, User
@@ -43,6 +43,78 @@ class RequestSerializer(serializers.ModelSerializer):
     # if "requestid" not in validated_data or not validated_data.get("requestid"):
     #     validated_data["requestid"] = uuid.uuid4()
     # return super().create(validated_data)
+
+
+class UserSummarySerializer(serializers.ModelSerializer):
+    user_id = serializers.UUIDField(source="userid", read_only=True)
+    display_name = serializers.CharField(source="displayname", read_only=True)
+    employee_code = serializers.CharField(source="employeecode", read_only=True)
+    avatar_url = serializers.CharField(source="avatarurl", read_only=True)
+
+    class Meta:
+        model = User
+        fields = ["user_id", "email", "display_name", "employee_code", "avatar_url"]
+
+
+class FlowSummarySerializer(serializers.ModelSerializer):
+    flow_id = serializers.UUIDField(source="flowid", read_only=True)
+
+    class Meta:
+        model = Flow
+        fields = ["flow_id", "name", "description"]
+
+
+class StatusSummarySerializer(serializers.ModelSerializer):
+    status_id = serializers.UUIDField(source="statusid", read_only=True)
+    is_terminal = serializers.BooleanField(source="isterminal", read_only=True)
+
+    class Meta:
+        model = Status
+        fields = ["status_id", "name", "category", "is_terminal"]
+
+
+class RequestDetailSerializer(serializers.ModelSerializer):
+    request_id = serializers.UUIDField(source="requestid", read_only=True)
+    human_id = serializers.CharField(source="humanid", read_only=True)
+    flow = FlowSummarySerializer(source="flowid", read_only=True)
+    status = StatusSummarySerializer(source="statusid", read_only=True)
+    requester = UserSummarySerializer(source="requesterid", read_only=True)
+    assignee = UserSummarySerializer(source="assigneeid", read_only=True)
+    flow_id = serializers.UUIDField(source="flowid_id", read_only=True)
+    status_id = serializers.UUIDField(source="statusid_id", read_only=True)
+    requester_id = serializers.UUIDField(source="requesterid_id", read_only=True)
+    assignee_id = serializers.UUIDField(source="assigneeid_id", read_only=True)
+    custom_fields = serializers.CharField(source="customfields", read_only=True)
+    due_at = serializers.DateTimeField(source="dueat", read_only=True)
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+    updated_at = serializers.DateTimeField(source="updatedat", read_only=True)
+    tags = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Request
+        fields = [
+            "request_id",
+            "human_id",
+            "title",
+            "description",
+            "priority",
+            "flow_id",
+            "flow",
+            "status_id",
+            "status",
+            "requester_id",
+            "requester",
+            "assignee_id",
+            "assignee",
+            "custom_fields",
+            "tags",
+            "due_at",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_tags(self, obj):
+        return []
 
 
 class CommentSerializer(serializers.ModelSerializer):
