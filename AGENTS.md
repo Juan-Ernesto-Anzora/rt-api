@@ -101,6 +101,20 @@
 - Optional OpenSearch backend for search with query DSL.
 - SSO/OIDC path with well-known discovery; keep JWT as fallback for dev.
 
+## 15. Codex ExecPlans
+
+For complex features, multi-file refactors, security-sensitive changes, API contract changes, database changes, upload/search changes, or Sprint work, Codex must create or update an ExecPlan following `.agent/PLANS.md`.
+
+ExecPlans must live under `docs/plans/`. The active ExecPlan must be updated throughout implementation, especially `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective`.
+
+For small single-file fixes, an ExecPlan is optional, but Codex must still state goal, constraints, and done criteria before editing.
+
+Before implementation, Codex must read:
+1. `AGENTS.md`
+2. `.agent/PLANS.md`
+3. the active ExecPlan for the branch
+4. any repo-specific design/API/token files referenced by the plan
+
 ---
 
 *This AGENTS.md reflects the design and constraints agreed for the Request Tracker modernization project.*

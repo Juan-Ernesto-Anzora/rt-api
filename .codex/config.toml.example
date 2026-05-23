@@ -1,0 +1,8 @@
+# .codex/config.toml.example
+# Copy to .codex/config.toml if you want repo-local Codex defaults.
+# Keep approvals and sandboxing conservative unless you intentionally loosen them.
+# Recommended project style:
+# - Plan first for multi-file features.
+# - Ask before destructive operations.
+# - Run repo-specific checks before suggesting a commit.
+# - Keep changes small and PR-focused.
