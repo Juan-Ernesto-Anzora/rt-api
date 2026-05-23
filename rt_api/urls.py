@@ -63,8 +63,18 @@ urlpatterns += [
         name="request-comments",
     ),
     path(
+        "api/requests/<str:request_pk>/comments/",
+        request_comments,
+        name="request-comments-slash",
+    ),
+    path(
         "api/requests/<str:request_pk>/attachments",
         request_attachments,
         name="request-attachments",
+    ),
+    path(
+        "api/requests/<str:request_pk>/attachments/",
+        request_attachments,
+        name="request-attachments-slash",
     ),
 ]
