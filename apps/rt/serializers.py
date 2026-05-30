@@ -1,48 +1,104 @@
 from rest_framework import serializers
 
-from .models import Activity, Attachment, Comment, Flow, Request, Status, User
-
-# No necesitas importar Flow, Status, User aquí si usas UUIDField
-# from .models import Flow, Status, User
+from .models import (
+    Activity,
+    Attachment,
+    Comment,
+    Flow,
+    Membership,
+    Request,
+    Status,
+    User,
+)
 
 
 class RequestSerializer(serializers.ModelSerializer):
-    # --- INICIO DEL CAMBIO ---
-    # Renombramos los campos para que coincidan directamente con los atributos del modelo
-    # y eliminamos el parámetro `source`.
-    flowid_id = serializers.UUIDField()
-    statusid_id = serializers.UUIDField()
-    requesterid_id = serializers.UUIDField()
-    assigneeid_id = serializers.UUIDField(required=False, allow_null=True)
-    # --- FIN DEL CAMBIO ---
+    VALID_PRIORITIES = {"low", "normal", "high", "urgent"}
+
+    request_id = serializers.UUIDField(source="requestid", read_only=True)
+    human_id = serializers.CharField(source="humanid", read_only=True)
+    flow_id = serializers.UUIDField(source="flowid_id")
+    status_id = serializers.UUIDField(source="statusid_id")
+    requester_id = serializers.UUIDField(source="requesterid_id")
+    assignee_id = serializers.UUIDField(
+        source="assigneeid_id", required=False, allow_null=True
+    )
+    custom_fields = serializers.CharField(
+        source="customfields", required=False, allow_blank=True, allow_null=True
+    )
+    due_at = serializers.DateTimeField(source="dueat", required=False, allow_null=True)
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+    updated_at = serializers.DateTimeField(source="updatedat", read_only=True)
 
     class Meta:
         model = Request
-        # Actualizamos la lista de campos para reflejar los nuevos nombres
         fields = [
-            "requestid",
-            "humanid",
+            "request_id",
+            "human_id",
             "title",
             "description",
-            "flowid_id",
-            "statusid_id",
-            "requesterid_id",
-            "assigneeid_id",
             "priority",
-            "dueat",
-            "createdat",
-            "updatedat",
+            "flow_id",
+            "status_id",
+            "requester_id",
+            "assignee_id",
+            "custom_fields",
+            "due_at",
+            "created_at",
+            "updated_at",
         ]
-        read_only_fields = ["requestid", "humanid", "createdat", "updatedat"]
 
-    # def create(self, validated_data):
-    # Opcional pero recomendado:
-    # Tu tabla ya genera el RequestId con DEFAULT (newsequentialid()).
-    # Es mejor dejar que la base de datos lo genere.
-    # Puedes eliminar esta lógica de generación de UUID.
-    # if "requestid" not in validated_data or not validated_data.get("requestid"):
-    #     validated_data["requestid"] = uuid.uuid4()
-    # return super().create(validated_data)
+    def validate_title(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Title is required.")
+        return value
+
+    def validate_priority(self, value):
+        normalized = value.strip().lower()
+        if normalized not in self.VALID_PRIORITIES:
+            allowed = ", ".join(sorted(self.VALID_PRIORITIES))
+            raise serializers.ValidationError(f"Priority must be one of: {allowed}.")
+        return normalized
+
+    def validate(self, attrs):
+        tenant_id = self.context.get("tenant_id")
+        if not tenant_id:
+            raise serializers.ValidationError({"tenant": ["Tenant context missing."]})
+
+        flow_id = attrs.get("flowid_id")
+        status_id = attrs.get("statusid_id")
+        requester_id = attrs.get("requesterid_id")
+        assignee_id = attrs.get("assigneeid_id")
+
+        self._get_tenant_object(Flow, "flow_id", flowid=flow_id, tenantid=tenant_id)
+        status = self._get_tenant_object(
+            Status, "status_id", statusid=status_id, tenantid=tenant_id
+        )
+        if status.flowid_id != flow_id:
+            raise serializers.ValidationError(
+                {"status_id": ["Status must belong to the selected flow."]}
+            )
+
+        self._validate_user_membership("requester_id", requester_id, tenant_id)
+        if assignee_id:
+            self._validate_user_membership("assignee_id", assignee_id, tenant_id)
+        return attrs
+
+    def _get_tenant_object(self, model, public_field, **lookup):
+        try:
+            return model.objects.get(**lookup)
+        except model.DoesNotExist as exc:
+            raise serializers.ValidationError(
+                {public_field: ["Not found for this tenant."]}
+            ) from exc
+
+    def _validate_user_membership(self, public_field, user_id, tenant_id):
+        if not Membership.objects.filter(
+            userid_id=user_id, tenantid_id=tenant_id
+        ).exists():
+            raise serializers.ValidationError(
+                {public_field: ["User is not a member of this tenant."]}
+            )
 
 
 class UserSummarySerializer(serializers.ModelSerializer):

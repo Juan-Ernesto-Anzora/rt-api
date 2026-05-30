@@ -7,7 +7,7 @@ from botocore.client import Config
 from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone
-from rest_framework import mixins, permissions, viewsets
+from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -61,6 +61,43 @@ class RequestViewSet(BaseTenantViewSet):
             return RequestDetailSerializer
         return super().get_serializer_class()
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["tenant_id"] = getattr(self.request, "tenant_id", None)
+        return context
+
+    def create(self, request, *args, **kwargs):
+        if not getattr(request, "tenant_id", None):
+            return Response(
+                {
+                    "code": "tenant_required",
+                    "message": "Tenant context missing.",
+                    "details": [],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "code": "validation_error",
+                    "message": "Invalid request payload.",
+                    "details": format_validation_details(serializer.errors),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        rt_request = self.perform_create(serializer)
+        response_serializer = self.get_serializer(rt_request)
+        headers = self.get_success_headers(response_serializer.data)
+        return Response(
+            response_serializer.data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
+        )
+
+    @transaction.atomic
     def perform_create(self, serializer):
         validated_data = serializer.validated_data
 
@@ -80,18 +117,42 @@ class RequestViewSet(BaseTenantViewSet):
         if isinstance(tenant_id, str):
             tenant_id = uuid.UUID(tenant_id)
 
+        now = timezone.now()
         save_kwargs = {
             "tenantid_id": tenant_id,
             "humanid": generate_human_id(str(tenant_id)),
-            "createdat": timezone.now(),
-            "updatedat": timezone.now(),
+            "createdat": now,
+            "updatedat": now,
             "flowid_id": flow_id,
             "statusid_id": status_id,
             "requesterid_id": requester_id,
         }
         if assignee_id:
             save_kwargs["assigneeid_id"] = assignee_id
-        serializer.save(**save_kwargs)
+        rt_request = serializer.save(**save_kwargs)
+        Activity.objects.create(
+            activityid=uuid.uuid4(),
+            tenantid=rt_request.tenantid,
+            requestid=rt_request,
+            actorid=rt_request.requesterid,
+            type="request.created",
+            payload=json.dumps(
+                {
+                    "human_id": rt_request.humanid,
+                    "title": rt_request.title,
+                    "flow_id": str(rt_request.flowid_id),
+                    "status_id": str(rt_request.statusid_id),
+                    "requester_id": str(rt_request.requesterid_id),
+                    "assignee_id": (
+                        str(rt_request.assigneeid_id)
+                        if rt_request.assigneeid_id
+                        else None
+                    ),
+                }
+            ),
+            createdat=save_kwargs["createdat"],
+        )
+        return rt_request
 
     @action(detail=True, methods=["get"])
     def activity(self, request, pk=None):
@@ -421,6 +482,25 @@ class SearchView(APIView):
                 status=400,
             )
         return Response(results)
+
+
+def format_validation_details(errors):
+    details = []
+
+    def walk(value, field):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_field = f"{field}.{key}" if field else str(key)
+                walk(child, child_field)
+            return
+        if isinstance(value, list):
+            for child in value:
+                walk(child, field)
+            return
+        details.append({"field": field, "message": str(value)})
+
+    walk(errors, "")
+    return details
 
 
 def build_storage_url(object_key):
