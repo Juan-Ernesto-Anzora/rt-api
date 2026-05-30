@@ -313,6 +313,7 @@ Day 3-4 acceptance:
 - Existing unit-test style avoids live SQL Server calls by monkeypatching model managers and `generate_human_id`.
 - Postman found a real create-request bug: `User` has no `tenantid` field, so validating `requester_id` or `assignee_id` with `User.objects.get(..., tenantid=...)` raises `FieldError` and returns 500.
 - Tenant membership for users is represented by `Membership.userid` and `Membership.tenantid`; Django lookup fields are `userid_id` and `tenantid_id`.
+- GitHub Actions found a timestamp determinism bug in `RequestViewSet.perform_create`: separate `timezone.now()` calls for `createdat` and `updatedat` can differ by microseconds and make tests flaky.
 
 ## Decision Log
 
@@ -323,6 +324,7 @@ Day 3-4 acceptance:
 - Keep backward-incompatible internal create field names out of the public create contract; tests assert `flowid_id`, `statusid_id`, and related names are not accepted as the required API fields.
 - Validate `requester_id` and optional `assignee_id` against `Membership.objects.filter(userid_id=<user_id>, tenantid_id=<tenant_id>).exists()` instead of filtering `User` by tenant.
 - Return serializer `ValidationError` on public fields `requester_id` and `assignee_id` when a user is not a member of the active tenant.
+- Compute the request creation timestamp once and reuse it for both `createdat` and `updatedat`.
 
 ## Outcomes & Retrospective
 

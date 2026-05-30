@@ -117,11 +117,12 @@ class RequestViewSet(BaseTenantViewSet):
         if isinstance(tenant_id, str):
             tenant_id = uuid.UUID(tenant_id)
 
+        now = timezone.now()
         save_kwargs = {
             "tenantid_id": tenant_id,
             "humanid": generate_human_id(str(tenant_id)),
-            "createdat": timezone.now(),
-            "updatedat": timezone.now(),
+            "createdat": now,
+            "updatedat": now,
             "flowid_id": flow_id,
             "statusid_id": status_id,
             "requesterid_id": requester_id,
