@@ -6,7 +6,9 @@ import boto3
 from botocore.client import Config
 from django.conf import settings
 from django.db import connection, transaction
+from django.db.models import Q
 from django.utils import timezone
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
@@ -14,7 +16,16 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Activity, Attachment, Comment, Request
+from .models import (
+    Activity,
+    Attachment,
+    Comment,
+    Flow,
+    Membership,
+    Request,
+    Status,
+    User,
+)
 from .search import SearchValidationError, search_requests
 from .serializers import (
     ActivitySerializer,
@@ -23,9 +34,12 @@ from .serializers import (
     AttachmentInitResponseSerializer,
     AttachmentSerializer,
     CommentSerializer,
+    FlowLookupSerializer,
     RequestDetailSerializer,
     RequestSerializer,
     SearchQuerySerializer,
+    StatusLookupSerializer,
+    UserLookupSerializer,
 )
 
 
@@ -191,6 +205,91 @@ class RequestViewSet(BaseTenantViewSet):
             tenantid=tenant_id, requestid=rt_request.requestid
         ).order_by("-createdat")
         return Response(ActivitySerializer(items, many=True).data)
+
+
+class FlowViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    permission_classes = [TenantPermission]
+    serializer_class = FlowLookupSerializer
+    lookup_field = "flowid"
+    lookup_url_kwarg = "flow_id"
+
+    @extend_schema(
+        responses=FlowLookupSerializer(many=True),
+        description="List flows available in the active tenant.",
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    def get_queryset(self):
+        tenant_id = getattr(self.request, "tenant_id", None)
+        if not tenant_id:
+            return Flow.objects.none()
+        return Flow.objects.filter(tenantid=tenant_id).order_by("name")
+
+    def get_flow(self):
+        tenant_id = getattr(self.request, "tenant_id", None)
+        try:
+            return Flow.objects.get(
+                flowid=self.kwargs.get(self.lookup_url_kwarg), tenantid=tenant_id
+            )
+        except Flow.DoesNotExist as exc:
+            raise NotFound(
+                {
+                    "code": "not_found",
+                    "message": "Flow not found for this tenant.",
+                    "details": [],
+                }
+            ) from exc
+
+    @extend_schema(
+        responses=StatusLookupSerializer(many=True),
+        description="List statuses for a tenant-scoped flow.",
+    )
+    @action(detail=True, methods=["get"], url_path="statuses")
+    def statuses(self, request, flow_id=None):
+        flow = self.get_flow()
+        statuses = Status.objects.filter(
+            tenantid=request.tenant_id, flowid=flow.flowid
+        ).order_by("name")
+        return Response(StatusLookupSerializer(statuses, many=True).data)
+
+
+class UserLookupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    permission_classes = [TenantPermission]
+    serializer_class = UserLookupSerializer
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="search",
+                description="Optional case-insensitive search by display name or email.",
+                required=False,
+                type=str,
+            )
+        ],
+        responses=UserLookupSerializer(many=True),
+        description="List users who belong to the active tenant.",
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    def get_queryset(self):
+        tenant_id = getattr(self.request, "tenant_id", None)
+        if not tenant_id:
+            return User.objects.none()
+
+        member_user_ids = Membership.objects.filter(tenantid=tenant_id).values_list(
+            "userid_id", flat=True
+        )
+        queryset = User.objects.filter(userid__in=member_user_ids).order_by(
+            "displayname", "email"
+        )
+        search = self.request.query_params.get("search", "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(displayname__icontains=search) | Q(email__icontains=search)
+            )
+        return queryset
 
 
 class CommentViewSet(

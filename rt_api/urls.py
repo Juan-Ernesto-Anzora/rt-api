@@ -14,8 +14,10 @@ from apps.rt.views import (
     AttachmentInitView,
     AttachmentViewSet,
     CommentViewSet,
+    FlowViewSet,
     RequestViewSet,
     SearchView,
+    UserLookupViewSet,
 )
 
 urlpatterns = [
@@ -49,6 +51,8 @@ urlpatterns = [
 
 router = SimpleRouter()
 router.register(r"api/requests", RequestViewSet, basename="requests")
+router.register(r"api/flows", FlowViewSet, basename="flows")
+router.register(r"api/users", UserLookupViewSet, basename="users")
 
 urlpatterns += router.urls
 

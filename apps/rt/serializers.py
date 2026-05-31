@@ -120,6 +120,14 @@ class FlowSummarySerializer(serializers.ModelSerializer):
         fields = ["flow_id", "name", "description"]
 
 
+class FlowLookupSerializer(serializers.ModelSerializer):
+    flow_id = serializers.UUIDField(source="flowid", read_only=True)
+
+    class Meta:
+        model = Flow
+        fields = ["flow_id", "name"]
+
+
 class StatusSummarySerializer(serializers.ModelSerializer):
     status_id = serializers.UUIDField(source="statusid", read_only=True)
     is_terminal = serializers.BooleanField(source="isterminal", read_only=True)
@@ -127,6 +135,25 @@ class StatusSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = Status
         fields = ["status_id", "name", "category", "is_terminal"]
+
+
+class StatusLookupSerializer(serializers.ModelSerializer):
+    status_id = serializers.UUIDField(source="statusid", read_only=True)
+    flow_id = serializers.UUIDField(source="flowid_id", read_only=True)
+    is_terminal = serializers.BooleanField(source="isterminal", read_only=True)
+
+    class Meta:
+        model = Status
+        fields = ["status_id", "flow_id", "name", "category", "is_terminal"]
+
+
+class UserLookupSerializer(serializers.ModelSerializer):
+    user_id = serializers.UUIDField(source="userid", read_only=True)
+    display_name = serializers.CharField(source="displayname", read_only=True)
+
+    class Meta:
+        model = User
+        fields = ["user_id", "display_name", "email"]
 
 
 class RequestDetailSerializer(serializers.ModelSerializer):
