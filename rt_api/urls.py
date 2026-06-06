@@ -14,6 +14,7 @@ from apps.rt.views import (
     AttachmentInitView,
     AttachmentViewSet,
     CommentViewSet,
+    DashboardSummaryView,
     FlowViewSet,
     RequestViewSet,
     SearchView,
@@ -43,6 +44,16 @@ urlpatterns = [
     ),
     path("api/search", SearchView.as_view(), name="search"),
     path("api/search/requests", SearchView.as_view(), name="search-requests"),
+    path(
+        "api/dashboard/summary",
+        DashboardSummaryView.as_view(),
+        name="dashboard-summary",
+    ),
+    path(
+        "api/dashboard/summary/",
+        DashboardSummaryView.as_view(),
+        name="dashboard-summary-slash",
+    ),
     path("api/schema", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/docs", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"

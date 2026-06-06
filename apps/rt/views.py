@@ -35,6 +35,7 @@ from .serializers import (
     AttachmentInitResponseSerializer,
     AttachmentSerializer,
     CommentSerializer,
+    DashboardSummarySerializer,
     FlowLookupSerializer,
     RequestCloseReopenSerializer,
     RequestDetailSerializer,
@@ -399,6 +400,32 @@ class UserLookupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         return queryset
 
 
+class DashboardSummaryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses=DashboardSummarySerializer,
+        description="Return tenant-scoped request dashboard KPI counts.",
+    )
+    def get(self, request):
+        tenant_id = getattr(request, "tenant_id", None)
+        if not tenant_id:
+            return Response(
+                {
+                    "code": "tenant_required",
+                    "message": "Tenant context missing.",
+                    "details": [],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        summary = build_dashboard_summary(
+            queryset=Request.objects.filter(tenantid=tenant_id),
+            user_id=getattr(getattr(request, "user", None), "id", None),
+        )
+        return Response(DashboardSummarySerializer(summary).data)
+
+
 class CommentViewSet(
     mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
 ):
@@ -718,6 +745,36 @@ def validation_error_response(errors):
         },
         status=status.HTTP_400_BAD_REQUEST,
     )
+
+
+def build_dashboard_summary(queryset, user_id=None):
+    today = timezone.localdate()
+    open_requests = queryset.filter(statusid__category__iexact="open")
+    in_progress_requests = queryset.filter(statusid__category__iexact="in_progress")
+    waiting_requests = queryset.filter(statusid__category__iexact="waiting")
+    closed_requests = queryset.filter(statusid__category__iexact="closed")
+    active_requests = queryset.exclude(statusid__category__iexact="closed").exclude(
+        statusid__isterminal=True
+    )
+
+    return {
+        "open": open_requests.count(),
+        "in_progress": in_progress_requests.count(),
+        "waiting": waiting_requests.count(),
+        "closed": closed_requests.count(),
+        "due_today": active_requests.filter(dueat__date=today).count(),
+        "overdue": active_requests.filter(dueat__date__lt=today).count(),
+        "assigned_to_me": count_assigned_to_me(queryset, user_id),
+        "unassigned": active_requests.filter(assigneeid__isnull=True).count(),
+    }
+
+
+def count_assigned_to_me(queryset, user_id):
+    try:
+        assignee_id = uuid.UUID(str(user_id))
+    except (TypeError, ValueError, AttributeError):
+        return 0
+    return queryset.filter(assigneeid_id=assignee_id).count()
 
 
 def transition_not_available_response(message):

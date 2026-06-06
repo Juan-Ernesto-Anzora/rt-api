@@ -344,6 +344,17 @@ class ActivitySerializer(serializers.ModelSerializer):
         fields = ["activityid", "requestid", "actorid", "type", "payload", "createdat"]
 
 
+class DashboardSummarySerializer(serializers.Serializer):
+    open = serializers.IntegerField()
+    in_progress = serializers.IntegerField()
+    waiting = serializers.IntegerField()
+    closed = serializers.IntegerField()
+    due_today = serializers.IntegerField()
+    overdue = serializers.IntegerField()
+    assigned_to_me = serializers.IntegerField()
+    unassigned = serializers.IntegerField()
+
+
 class SearchQuerySerializer(serializers.Serializer):
     q = serializers.CharField(max_length=200, trim_whitespace=True)
     page = serializers.IntegerField(required=False, min_value=1, default=1)
