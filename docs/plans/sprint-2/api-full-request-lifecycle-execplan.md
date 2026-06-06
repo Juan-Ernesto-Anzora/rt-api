@@ -122,6 +122,14 @@ Behavior:
 
 Add `available-transitions`, `transition`, `close`, and `reopen` endpoints. Validate allowed transitions, create optional comment, and create activity.
 
+Implemented behavior:
+
+- `GET /api/requests/{id}/available-transitions/` lists transitions available from the request current status.
+- `POST /api/requests/{id}/transition/` applies a specific `transition_id`.
+- `POST /api/requests/{id}/close/` applies the first available transition to a closed category or terminal status.
+- `POST /api/requests/{id}/reopen/` applies the first available transition to an open category.
+- Transition actions are tenant-scoped through `RequestViewSet.get_object()`, validate the transition belongs to the request current flow/status, optionally create a public comment, update `updatedat`, and create `Activity` rows.
+
 ### Milestone 5: Dashboard summary
 
 Add `GET /api/dashboard/summary/` returning open, in_progress, waiting, closed, due_today, overdue, assigned_to_me, and unassigned.
@@ -318,7 +326,7 @@ Day 3-4 acceptance:
 - [x] Milestone 3 completed.
   - [x] Postman regression fixed: requester/assignee tenant checks use `Membership`, not `User.tenantid`.
   - [x] Web create-request lookup endpoints added.
-- [ ] Milestone 4 completed.
+- [x] Milestone 4 completed.
 - [ ] Milestone 5 completed.
 - [ ] Milestone 6 completed.
 
@@ -335,6 +343,8 @@ Day 3-4 acceptance:
 - GitHub Actions found a timestamp determinism bug in `RequestViewSet.perform_create`: separate `timezone.now()` calls for `createdat` and `updatedat` can differ by microseconds and make tests flaky.
 - The web cannot create requests ergonomically with raw GUIDs; it needs tenant-scoped lookup endpoints for flows, statuses, and tenant users.
 - Status lookup must verify the parent flow tenant before listing statuses to avoid cross-tenant probing.
+- Workflow transitions are tenant-scoped by first resolving the request through `RequestViewSet.get_object()`; `Transition` itself has no tenant field and is scoped through the request flow and current status.
+- drf-spectacular names request action path parameters with the model lookup field, so generated transition paths use `{requestid}`.
 
 ## Decision Log
 
@@ -348,6 +358,9 @@ Day 3-4 acceptance:
 - Compute the request creation timestamp once and reuse it for both `createdat` and `updatedat`.
 - Register read-only lookup viewsets for flows and users so drf-spectacular emits OpenAPI entries for `/api/flows/`, `/api/flows/{flow_id}/statuses/`, and `/api/users/`.
 - Use `Membership.objects.filter(tenantid=<tenant_id>).values_list("userid_id", flat=True)` to tenant-scope user lookup results.
+- Implement close/reopen as convenience actions over existing `Transition` rows instead of directly setting statuses, preserving workflow rules.
+- Use requester as workflow actor and optional comment author until auth-user to `dbo.User` mapping is introduced.
+- Record workflow activity types as `request.transitioned`, `request.closed`, and `request.reopened`.
 
 ## Outcomes & Retrospective
 
@@ -357,6 +370,7 @@ Milestone 3 complete on `feat/api-create-request-flow`:
 - Create validation enforces tenant-scoped `flow_id`, `status_id`, `requester_id`, optional `assignee_id`, and status-to-flow ownership.
 - User tenant enforcement now checks `Membership`, preventing the SQL/Django `FieldError` seen in Postman.
 - Web lookup endpoints now provide tenant-scoped flow, status, and user options for Create Request.
+- Workflow transition endpoints now expose available transitions and support transition, close, and reopen actions with activity logging.
 - Request creation remains server-owned for `tenantid`, `HumanId`, `createdat`, and `updatedat`.
 - Successful create writes `Activity` type `request.created`.
 - Focused and full pytest verification passed locally.

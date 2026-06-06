@@ -8,6 +8,7 @@ from .models import (
     Membership,
     Request,
     Status,
+    Transition,
     User,
 )
 
@@ -154,6 +155,26 @@ class UserLookupSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ["user_id", "display_name", "email"]
+
+
+class TransitionLookupSerializer(serializers.ModelSerializer):
+    transition_id = serializers.UUIDField(source="transitionid", read_only=True)
+    from_status_id = serializers.UUIDField(source="fromstatusid_id", read_only=True)
+    to_status_id = serializers.UUIDField(source="tostatusid_id", read_only=True)
+    to_status = StatusLookupSerializer(source="tostatusid", read_only=True)
+
+    class Meta:
+        model = Transition
+        fields = ["transition_id", "from_status_id", "to_status_id", "to_status"]
+
+
+class RequestTransitionSerializer(serializers.Serializer):
+    transition_id = serializers.UUIDField()
+    comment = serializers.CharField(required=False, allow_blank=True)
+
+
+class RequestCloseReopenSerializer(serializers.Serializer):
+    comment = serializers.CharField(required=False, allow_blank=True)
 
 
 class RequestDetailSerializer(serializers.ModelSerializer):
