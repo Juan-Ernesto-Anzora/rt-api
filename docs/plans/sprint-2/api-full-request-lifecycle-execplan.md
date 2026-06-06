@@ -134,6 +134,14 @@ Implemented behavior:
 
 Add `GET /api/dashboard/summary/` returning open, in_progress, waiting, closed, due_today, overdue, assigned_to_me, and unassigned.
 
+Implemented behavior:
+
+- `GET /api/dashboard/summary/` and `GET /api/dashboard/summary` return tenant-scoped KPI counts.
+- Counts are based on `Request` rows for the active tenant and status categories: `open`, `in_progress`, `waiting`, and `closed`.
+- `due_today` and `overdue` exclude closed/terminal requests; `due_today` counts requests due on the current local date, while `overdue` counts requests due before today.
+- `assigned_to_me` uses `request.user.id` only when it is a UUID matching `dbo.User.UserId`; otherwise it returns `0` to avoid SQL conversion errors.
+- `unassigned` counts active requests with no assignee.
+
 ### Milestone 6: Notification baseline
 
 Add `apps/rt/services/notification_service.py`. Send Mailhog-visible emails for request created, assigned, comment added, and closed. Email failure must not break the main action.
@@ -327,7 +335,7 @@ Day 3-4 acceptance:
   - [x] Postman regression fixed: requester/assignee tenant checks use `Membership`, not `User.tenantid`.
   - [x] Web create-request lookup endpoints added.
 - [x] Milestone 4 completed.
-- [ ] Milestone 5 completed.
+- [x] Milestone 5 completed.
 - [ ] Milestone 6 completed.
 
 ## Surprises & Discoveries
@@ -345,6 +353,8 @@ Day 3-4 acceptance:
 - Status lookup must verify the parent flow tenant before listing statuses to avoid cross-tenant probing.
 - Workflow transitions are tenant-scoped by first resolving the request through `RequestViewSet.get_object()`; `Transition` itself has no tenant field and is scoped through the request flow and current status.
 - drf-spectacular names request action path parameters with the model lookup field, so generated transition paths use `{requestid}`.
+- Dashboard summary can be implemented as a read-only APIView backed by tenant-filtered `Request` querysets; no new database model or service package was needed.
+- Auth user to `dbo.User` mapping is still not formalized, so `assigned_to_me` must tolerate non-UUID Django user ids and return `0` instead of raising conversion errors.
 
 ## Decision Log
 
@@ -361,6 +371,9 @@ Day 3-4 acceptance:
 - Implement close/reopen as convenience actions over existing `Transition` rows instead of directly setting statuses, preserving workflow rules.
 - Use requester as workflow actor and optional comment author until auth-user to `dbo.User` mapping is introduced.
 - Record workflow activity types as `request.transitioned`, `request.closed`, and `request.reopened`.
+- Expose dashboard summary at `/api/dashboard/summary/` with a no-trailing-slash alias for Postman/client tolerance.
+- Keep `due_today` and `overdue` mutually exclusive by counting overdue as due dates before the current local date.
+- Exclude closed category and terminal statuses from due/overdue/unassigned active-work counts.
 
 ## Outcomes & Retrospective
 
@@ -371,6 +384,7 @@ Milestone 3 complete on `feat/api-create-request-flow`:
 - User tenant enforcement now checks `Membership`, preventing the SQL/Django `FieldError` seen in Postman.
 - Web lookup endpoints now provide tenant-scoped flow, status, and user options for Create Request.
 - Workflow transition endpoints now expose available transitions and support transition, close, and reopen actions with activity logging.
+- Dashboard summary endpoint now returns tenant-scoped KPI counts for the Home dashboard.
 - Request creation remains server-owned for `tenantid`, `HumanId`, `createdat`, and `updatedat`.
 - Successful create writes `Activity` type `request.created`.
 - Focused and full pytest verification passed locally.
