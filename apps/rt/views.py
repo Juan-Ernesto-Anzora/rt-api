@@ -24,6 +24,7 @@ from .models import (
     Membership,
     Request,
     Status,
+    Transition,
     User,
 )
 from .search import SearchValidationError, search_requests
@@ -35,10 +36,13 @@ from .serializers import (
     AttachmentSerializer,
     CommentSerializer,
     FlowLookupSerializer,
+    RequestCloseReopenSerializer,
     RequestDetailSerializer,
     RequestSerializer,
+    RequestTransitionSerializer,
     SearchQuerySerializer,
     StatusLookupSerializer,
+    TransitionLookupSerializer,
     UserLookupSerializer,
 )
 
@@ -205,6 +209,109 @@ class RequestViewSet(BaseTenantViewSet):
             tenantid=tenant_id, requestid=rt_request.requestid
         ).order_by("-createdat")
         return Response(ActivitySerializer(items, many=True).data)
+
+    @extend_schema(
+        responses=TransitionLookupSerializer(many=True),
+        description="List workflow transitions available from the request current status.",
+    )
+    @action(detail=True, methods=["get"], url_path="available-transitions")
+    def available_transitions(self, request, pk=None):
+        rt_request = self.get_object()
+        transitions = get_available_transitions(rt_request)
+        return Response(TransitionLookupSerializer(transitions, many=True).data)
+
+    @extend_schema(
+        request=RequestTransitionSerializer,
+        responses=RequestSerializer,
+        description="Apply a workflow transition to a tenant-scoped request.",
+    )
+    @action(detail=True, methods=["post"], url_path="transition")
+    def transition(self, request, pk=None):
+        serializer = RequestTransitionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return validation_error_response(serializer.errors)
+
+        rt_request = self.get_object()
+        try:
+            transition = get_available_transitions(rt_request).get(
+                transitionid=serializer.validated_data["transition_id"]
+            )
+        except Transition.DoesNotExist:
+            return Response(
+                {
+                    "code": "invalid_transition",
+                    "message": "Transition is not available for this request.",
+                    "details": [
+                        {
+                            "field": "transition_id",
+                            "message": "Not available from current status.",
+                        }
+                    ],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        updated_request = apply_transition(
+            rt_request=rt_request,
+            transition=transition,
+            action_type="request.transitioned",
+            comment=serializer.validated_data.get("comment") or "",
+        )
+        return Response(RequestSerializer(updated_request).data)
+
+    @extend_schema(
+        request=RequestCloseReopenSerializer,
+        responses=RequestSerializer,
+        description="Close a request using an available terminal/closed transition.",
+    )
+    @action(detail=True, methods=["post"], url_path="close")
+    def close(self, request, pk=None):
+        serializer = RequestCloseReopenSerializer(data=request.data)
+        if not serializer.is_valid():
+            return validation_error_response(serializer.errors)
+
+        rt_request = self.get_object()
+        transition = find_transition_by_target_category(
+            rt_request, categories={"closed"}, terminal=True
+        )
+        if not transition:
+            return transition_not_available_response(
+                "No close transition is available."
+            )
+
+        updated_request = apply_transition(
+            rt_request=rt_request,
+            transition=transition,
+            action_type="request.closed",
+            comment=serializer.validated_data.get("comment") or "",
+        )
+        return Response(RequestSerializer(updated_request).data)
+
+    @extend_schema(
+        request=RequestCloseReopenSerializer,
+        responses=RequestSerializer,
+        description="Reopen a request using an available open transition.",
+    )
+    @action(detail=True, methods=["post"], url_path="reopen")
+    def reopen(self, request, pk=None):
+        serializer = RequestCloseReopenSerializer(data=request.data)
+        if not serializer.is_valid():
+            return validation_error_response(serializer.errors)
+
+        rt_request = self.get_object()
+        transition = find_transition_by_target_category(rt_request, categories={"open"})
+        if not transition:
+            return transition_not_available_response(
+                "No reopen transition is available."
+            )
+
+        updated_request = apply_transition(
+            rt_request=rt_request,
+            transition=transition,
+            action_type="request.reopened",
+            comment=serializer.validated_data.get("comment") or "",
+        )
+        return Response(RequestSerializer(updated_request).data)
 
 
 class FlowViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
@@ -600,6 +707,86 @@ def format_validation_details(errors):
 
     walk(errors, "")
     return details
+
+
+def validation_error_response(errors):
+    return Response(
+        {
+            "code": "validation_error",
+            "message": "Invalid request payload.",
+            "details": format_validation_details(errors),
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def transition_not_available_response(message):
+    return Response(
+        {
+            "code": "invalid_transition",
+            "message": message,
+            "details": [],
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def get_available_transitions(rt_request):
+    return Transition.objects.filter(
+        flowid=rt_request.flowid_id,
+        fromstatusid=rt_request.statusid_id,
+    ).select_related("tostatusid")
+
+
+def find_transition_by_target_category(rt_request, categories, terminal=False):
+    normalized_categories = {category.lower() for category in categories}
+    for transition in get_available_transitions(rt_request):
+        target = transition.tostatusid
+        category = (target.category or "").lower()
+        if category in normalized_categories or (terminal and target.isterminal):
+            return transition
+    return None
+
+
+@transaction.atomic
+def apply_transition(rt_request, transition, action_type, comment=""):
+    previous_status_id = rt_request.statusid_id
+    now = timezone.now()
+    rt_request.statusid = transition.tostatusid
+    rt_request.updatedat = now
+    rt_request.save(update_fields=["statusid", "updatedat"])
+
+    created_comment = None
+    if comment:
+        created_comment = Comment.objects.create(
+            commentid=uuid.uuid4(),
+            tenantid=rt_request.tenantid,
+            requestid=rt_request,
+            authorid=rt_request.requesterid,
+            messagemd=comment,
+            visibility="public",
+            createdat=now,
+        )
+
+    Activity.objects.create(
+        activityid=uuid.uuid4(),
+        tenantid=rt_request.tenantid,
+        requestid=rt_request,
+        actorid=rt_request.requesterid,
+        type=action_type,
+        payload=json.dumps(
+            {
+                "transition_id": str(transition.transitionid),
+                "from_status_id": str(previous_status_id),
+                "to_status_id": str(transition.tostatusid_id),
+                "comment_id": (
+                    str(created_comment.commentid) if created_comment else None
+                ),
+            }
+        ),
+        createdat=now,
+    )
+    return rt_request
 
 
 def build_storage_url(object_key):
