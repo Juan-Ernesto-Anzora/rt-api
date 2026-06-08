@@ -66,10 +66,16 @@ class RequestSerializer(serializers.ModelSerializer):
         if not tenant_id:
             raise serializers.ValidationError({"tenant": ["Tenant context missing."]})
 
-        flow_id = attrs.get("flowid_id")
-        status_id = attrs.get("statusid_id")
-        requester_id = attrs.get("requesterid_id")
-        assignee_id = attrs.get("assigneeid_id")
+        instance = getattr(self, "instance", None)
+        missing = object()
+        flow_id = attrs.get("flowid_id", getattr(instance, "flowid_id", None))
+        status_id = attrs.get("statusid_id", getattr(instance, "statusid_id", None))
+        requester_id = attrs.get(
+            "requesterid_id", getattr(instance, "requesterid_id", None)
+        )
+        assignee_id = attrs.get("assigneeid_id", missing)
+        if assignee_id is missing:
+            assignee_id = getattr(instance, "assigneeid_id", None)
 
         self._get_tenant_object(Flow, "flow_id", flowid=flow_id, tenantid=tenant_id)
         status = self._get_tenant_object(
