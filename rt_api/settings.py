@@ -121,6 +121,17 @@ MINIO_BUCKET = os.getenv("MINIO_BUCKET", "rt-attachments")
 MINIO_REGION = os.getenv("MINIO_REGION", "us-east-1")
 MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", "")
 
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
+)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "1025"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "0") == "1"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "rt-api@localhost")
+WEB_BASE_URL = os.getenv("WEB_BASE_URL", "http://127.0.0.1:5173")
+
 CSRF_TRUSTED_ORIGINS = os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:5173").split(
     ","
 )

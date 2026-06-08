@@ -46,6 +46,12 @@ from .serializers import (
     TransitionLookupSerializer,
     UserLookupSerializer,
 )
+from .services.notification_service import (
+    notify_comment_added,
+    notify_request_assigned,
+    notify_request_closed,
+    notify_request_created,
+)
 
 
 class TenantPermission(permissions.IsAuthenticated):
@@ -171,7 +177,26 @@ class RequestViewSet(BaseTenantViewSet):
             ),
             createdat=save_kwargs["createdat"],
         )
+        notify_request_created(rt_request)
+        if rt_request.assigneeid_id:
+            notify_request_assigned(rt_request)
         return rt_request
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        previous_assignee_id = getattr(instance, "assigneeid_id", None)
+        previous_status = getattr(instance, "statusid", None)
+
+        rt_request = serializer.save(updatedat=timezone.now())
+        current_assignee_id = getattr(rt_request, "assigneeid_id", None)
+        if current_assignee_id and current_assignee_id != previous_assignee_id:
+            notify_request_assigned(rt_request)
+
+        if status_changed_to_closed(
+            previous_status, getattr(rt_request, "statusid", None)
+        ):
+            notify_request_closed(rt_request)
 
     @action(detail=True, methods=["get"])
     def activity(self, request, pk=None):
@@ -468,13 +493,15 @@ class CommentViewSet(
 
     def perform_create(self, serializer):
         req = self.get_request()
-        serializer.save(
+        comment = serializer.save(
             commentid=uuid.uuid4(),
             tenantid=req.tenantid,
             requestid=req,
             authorid=req.requesterid,
             createdat=timezone.now(),
         )
+        if comment:
+            notify_comment_added(comment)
 
 
 class AttachmentViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
@@ -644,6 +671,7 @@ class AttachmentFinalizeView(APIView):
             ),
             createdat=now,
         )
+        notify_comment_added(comment)
 
         return Response(
             {
@@ -805,9 +833,21 @@ def find_transition_by_target_category(rt_request, categories, terminal=False):
     return None
 
 
+def status_category(status_obj):
+    return (getattr(status_obj, "category", "") or "").lower()
+
+
+def status_changed_to_closed(previous_status, current_status):
+    return (
+        status_category(previous_status) != "closed"
+        and status_category(current_status) == "closed"
+    )
+
+
 @transaction.atomic
 def apply_transition(rt_request, transition, action_type, comment=""):
     previous_status_id = rt_request.statusid_id
+    previous_status = rt_request.statusid
     now = timezone.now()
     rt_request.statusid = transition.tostatusid
     rt_request.updatedat = now
@@ -843,6 +883,8 @@ def apply_transition(rt_request, transition, action_type, comment=""):
         ),
         createdat=now,
     )
+    if status_changed_to_closed(previous_status, transition.tostatusid):
+        notify_request_closed(rt_request)
     return rt_request
 
 
