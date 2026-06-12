@@ -10,6 +10,8 @@ from rest_framework_simplejwt.views import (
 
 from apps.common import views as common_views
 from apps.rt.views import (
+    AdminAuditView,
+    AdminPermissionsView,
     AttachmentFinalizeView,
     AttachmentInitView,
     AttachmentViewSet,
@@ -53,6 +55,16 @@ urlpatterns = [
         "api/dashboard/summary/",
         DashboardSummaryView.as_view(),
         name="dashboard-summary-slash",
+    ),
+    path(
+        "api/admin/me/permissions/",
+        AdminPermissionsView.as_view(),
+        name="admin-me-permissions",
+    ),
+    path(
+        "api/admin/audit/",
+        AdminAuditView.as_view(),
+        name="admin-audit",
     ),
     path("api/schema", SpectacularAPIView.as_view(), name="schema"),
     path(

@@ -350,6 +350,39 @@ class ActivitySerializer(serializers.ModelSerializer):
         fields = ["activityid", "requestid", "actorid", "type", "payload", "createdat"]
 
 
+class AdminUserContextSerializer(serializers.Serializer):
+    user_id = serializers.UUIDField()
+    display_name = serializers.CharField()
+    email = serializers.EmailField()
+
+
+class AdminPermissionsSerializer(serializers.Serializer):
+    tenant_id = serializers.UUIDField()
+    user = AdminUserContextSerializer()
+    roles = serializers.ListField(child=serializers.CharField())
+    permissions = serializers.ListField(child=serializers.CharField())
+    is_admin = serializers.BooleanField()
+    can_read_audit = serializers.BooleanField()
+
+
+class AdminAuditSerializer(serializers.ModelSerializer):
+    activity_id = serializers.UUIDField(source="activityid", read_only=True)
+    request_id = serializers.UUIDField(source="requestid_id", read_only=True)
+    actor_id = serializers.UUIDField(source="actorid_id", read_only=True)
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+
+    class Meta:
+        model = Activity
+        fields = [
+            "activity_id",
+            "request_id",
+            "actor_id",
+            "type",
+            "payload",
+            "created_at",
+        ]
+
+
 class DashboardSummarySerializer(serializers.Serializer):
     open = serializers.IntegerField()
     in_progress = serializers.IntegerField()

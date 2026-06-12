@@ -12,6 +12,7 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -30,6 +31,8 @@ from .models import (
 from .search import SearchValidationError, search_requests
 from .serializers import (
     ActivitySerializer,
+    AdminAuditSerializer,
+    AdminPermissionsSerializer,
     AttachmentFinalizeRequestSerializer,
     AttachmentInitRequestSerializer,
     AttachmentInitResponseSerializer,
@@ -45,6 +48,12 @@ from .serializers import (
     StatusLookupSerializer,
     TransitionLookupSerializer,
     UserLookupSerializer,
+)
+from .services.admin_permissions import (
+    ADMIN_ACCESS_PERMISSION,
+    ADMIN_AUDIT_READ_PERMISSION,
+    AdminPermissionError,
+    get_admin_context,
 )
 from .services.notification_service import (
     notify_comment_added,
@@ -451,6 +460,61 @@ class DashboardSummaryView(APIView):
         return Response(DashboardSummarySerializer(summary).data)
 
 
+class AdminPermissionsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses=AdminPermissionsSerializer,
+        description="Return current tenant admin roles and effective permissions.",
+    )
+    def get(self, request):
+        try:
+            context = get_admin_context(
+                request, required_permission=ADMIN_ACCESS_PERMISSION
+            )
+        except AdminPermissionError as exc:
+            return admin_error_response(exc)
+        return Response(AdminPermissionsSerializer(context).data)
+
+
+class AdminAuditView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses=AdminAuditSerializer(many=True),
+        description="Return tenant-scoped admin audit activity.",
+    )
+    def get(self, request):
+        try:
+            get_admin_context(request, required_permission=ADMIN_AUDIT_READ_PERMISSION)
+        except AdminPermissionError as exc:
+            return admin_error_response(exc)
+
+        queryset = Activity.objects.filter(tenantid=request.tenant_id).order_by(
+            "-createdat"
+        )
+        activity_type = request.query_params.get("type")
+        request_id = request.query_params.get("request_id")
+        actor_id = request.query_params.get("actor_id")
+        created_from = request.query_params.get("created_from")
+        created_to = request.query_params.get("created_to")
+        if activity_type:
+            queryset = queryset.filter(type=activity_type)
+        if request_id:
+            queryset = queryset.filter(requestid_id=request_id)
+        if actor_id:
+            queryset = queryset.filter(actorid_id=actor_id)
+        if created_from:
+            queryset = queryset.filter(createdat__gte=created_from)
+        if created_to:
+            queryset = queryset.filter(createdat__lte=created_to)
+
+        paginator = PageNumberPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        serializer = AdminAuditSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
 class CommentViewSet(
     mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
 ):
@@ -772,6 +836,17 @@ def validation_error_response(errors):
             "details": format_validation_details(errors),
         },
         status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def admin_error_response(exc):
+    return Response(
+        {
+            "code": exc.code,
+            "message": exc.message,
+            "details": [],
+        },
+        status=exc.status_code,
     )
 
 

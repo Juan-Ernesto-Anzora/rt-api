@@ -513,23 +513,34 @@ class Savedsearch(models.Model):
 
 # M:N tables
 
-# class Membershiprole(models.Model):
-#    pk = models.CompositePrimaryKey('MembershipId', 'RoleId')
-#    membershipid = models.ForeignKey(Membership, models.DO_NOTHING, db_column='MembershipId')  # Field name made lowercase.
-#    roleid = models.ForeignKey('Role', models.DO_NOTHING, db_column='RoleId')  # Field name made lowercase.
-#
-#    class Meta:
-#        managed = False
-#        db_table = 'MembershipRole'
 
-# class Rolepermission(models.Model):
-#     pk = models.CompositePrimaryKey('RoleId', 'PermissionCode')
-#     roleid = models.ForeignKey(Role, models.DO_NOTHING, db_column='RoleId')  # Field name made lowercase.
-#     permissioncode = models.ForeignKey(Permission, models.DO_NOTHING, db_column='PermissionCode')  # Field name made lowercase.
-#
-#     class Meta:
-#         managed = False
-#         db_table = 'RolePermission'
+class Membershiprole(models.Model):
+    pk = models.CompositePrimaryKey("membershipid", "roleid")
+    membershipid = models.ForeignKey(
+        Membership, models.DO_NOTHING, db_column="MembershipId"
+    )  # Field name made lowercase.
+    roleid = models.ForeignKey(
+        "Role", models.DO_NOTHING, db_column="RoleId"
+    )  # Field name made lowercase.
+
+    class Meta:
+        managed = False
+        db_table = "MembershipRole"
+
+
+class Rolepermission(models.Model):
+    pk = models.CompositePrimaryKey("roleid", "permissioncode")
+    roleid = models.ForeignKey(
+        Role, models.DO_NOTHING, db_column="RoleId"
+    )  # Field name made lowercase.
+    permissioncode = models.ForeignKey(
+        Permission, models.DO_NOTHING, db_column="PermissionCode"
+    )  # Field name made lowercase.
+
+    class Meta:
+        managed = False
+        db_table = "RolePermission"
+
 
 # class Requesttag(models.Model):
 #    pk = models.CompositePrimaryKey('RequestId', 'TagId')
