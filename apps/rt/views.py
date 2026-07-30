@@ -8,7 +8,7 @@ from django.conf import settings
 from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
-from drf_spectacular.utils import OpenApiParameter, extend_schema
+from drf_spectacular.utils import OpenApiExample, OpenApiParameter, extend_schema
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
@@ -32,7 +32,13 @@ from .search import SearchValidationError, search_requests
 from .serializers import (
     ActivitySerializer,
     AdminAuditSerializer,
+    AdminFlowSerializer,
+    AdminFlowWriteSerializer,
     AdminPermissionsSerializer,
+    AdminStatusSerializer,
+    AdminStatusWriteSerializer,
+    AdminTransitionSerializer,
+    AdminTransitionWriteSerializer,
     AttachmentFinalizeRequestSerializer,
     AttachmentInitRequestSerializer,
     AttachmentInitResponseSerializer,
@@ -513,6 +519,414 @@ class AdminAuditView(APIView):
         page = paginator.paginate_queryset(queryset, request, view=self)
         serializer = AdminAuditSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+
+class AdminWorkflowBaseView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_admin_context_or_response(self, request):
+        try:
+            return get_admin_context(
+                request, required_permission=ADMIN_ACCESS_PERMISSION
+            )
+        except AdminPermissionError as exc:
+            return admin_error_response(exc)
+
+    def get_flow(self, request, flow_id):
+        try:
+            return Flow.objects.get(flowid=flow_id, tenantid=request.tenant_id)
+        except Flow.DoesNotExist as exc:
+            raise NotFound(
+                {
+                    "code": "not_found",
+                    "message": "Workflow not found for this tenant.",
+                    "details": [],
+                }
+            ) from exc
+
+    def get_status(self, request, flow, status_id):
+        try:
+            return Status.objects.get(
+                statusid=status_id, tenantid=request.tenant_id, flowid=flow.flowid
+            )
+        except Status.DoesNotExist as exc:
+            raise NotFound(
+                {
+                    "code": "not_found",
+                    "message": "Status not found for this workflow and tenant.",
+                    "details": [],
+                }
+            ) from exc
+
+    def get_transition(self, flow, transition_id):
+        try:
+            return Transition.objects.get(
+                transitionid=transition_id, flowid=flow.flowid
+            )
+        except Transition.DoesNotExist as exc:
+            raise NotFound(
+                {
+                    "code": "not_found",
+                    "message": "Transition not found for this workflow.",
+                    "details": [],
+                }
+            ) from exc
+
+    def admin_validation_response(self, serializer):
+        return Response(
+            {
+                "code": "validation_error",
+                "message": "Invalid admin workflow payload.",
+                "details": format_validation_details(serializer.errors),
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    def write_audit(self, request, admin_context, activity_type, payload):
+        Activity.objects.create(
+            activityid=uuid.uuid4(),
+            tenantid_id=request.tenant_id,
+            requestid_id=None,
+            actorid_id=admin_context.user.user_id,
+            type=activity_type,
+            payload=json.dumps(payload, default=str),
+            createdat=timezone.now(),
+        )
+
+    def transition_statuses(self, request, flow, serializer):
+        from_status = self.get_status(
+            request, flow, serializer.validated_data["from_status_id"]
+        )
+        to_status = self.get_status(
+            request, flow, serializer.validated_data["to_status_id"]
+        )
+        return from_status, to_status
+
+
+class AdminWorkflowListCreateView(AdminWorkflowBaseView):
+    @extend_schema(
+        responses=AdminFlowSerializer(many=True),
+        examples=[
+            OpenApiExample(
+                "Workflow list",
+                value=[
+                    {
+                        "flow_id": "11111111-1111-1111-1111-111111111111",
+                        "name": "IT Support",
+                        "description": "Default support workflow",
+                        "created_at": "2026-06-12T12:00:00Z",
+                    }
+                ],
+                response_only=True,
+            )
+        ],
+        description="List tenant-scoped workflows for admin configuration.",
+    )
+    def get(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        flows = Flow.objects.filter(tenantid=request.tenant_id).order_by("name")
+        return Response(AdminFlowSerializer(flows, many=True).data)
+
+    @extend_schema(
+        request=AdminFlowWriteSerializer,
+        responses={201: AdminFlowSerializer},
+        examples=[
+            OpenApiExample(
+                "Create workflow",
+                value={"name": "Facilities", "description": "Facilities requests"},
+                request_only=True,
+            )
+        ],
+        description="Create a tenant-scoped workflow and audit the admin write.",
+    )
+    def post(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminFlowWriteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.admin_validation_response(serializer)
+
+        now = timezone.now()
+        with transaction.atomic():
+            flow = Flow.objects.create(
+                flowid=uuid.uuid4(),
+                tenantid_id=request.tenant_id,
+                name=serializer.validated_data["name"],
+                description=serializer.validated_data.get("description") or "",
+                createdat=now,
+            )
+            self.write_audit(
+                request,
+                admin_context,
+                "admin.workflow.created",
+                {"flow_id": flow.flowid, "name": flow.name},
+            )
+        return Response(AdminFlowSerializer(flow).data, status=status.HTTP_201_CREATED)
+
+
+class AdminWorkflowDetailView(AdminWorkflowBaseView):
+    @extend_schema(
+        responses=AdminFlowSerializer,
+        description="Return a tenant-scoped workflow with statuses and transitions.",
+    )
+    def get(self, request, flow_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        flow = self.get_flow(request, flow_id)
+        data = AdminFlowSerializer(flow).data
+        data["statuses"] = AdminStatusSerializer(
+            Status.objects.filter(
+                tenantid=request.tenant_id, flowid=flow.flowid
+            ).order_by("name"),
+            many=True,
+        ).data
+        data["transitions"] = AdminTransitionSerializer(
+            Transition.objects.filter(flowid=flow.flowid).order_by("createdat"),
+            many=True,
+        ).data
+        return Response(data)
+
+    @extend_schema(
+        request=AdminFlowWriteSerializer,
+        responses=AdminFlowSerializer,
+        examples=[
+            OpenApiExample(
+                "Update workflow",
+                value={"name": "IT Support", "description": "Updated description"},
+                request_only=True,
+            )
+        ],
+        description="Update a tenant-scoped workflow and audit the admin write.",
+    )
+    def patch(self, request, flow_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        flow = self.get_flow(request, flow_id)
+        serializer = AdminFlowWriteSerializer(data=request.data, partial=True)
+        if not serializer.is_valid():
+            return self.admin_validation_response(serializer)
+
+        changed_fields = []
+        for field in ("name", "description"):
+            if field in serializer.validated_data:
+                setattr(flow, field, serializer.validated_data[field] or "")
+                changed_fields.append(field)
+        with transaction.atomic():
+            if changed_fields:
+                flow.save(update_fields=changed_fields)
+            self.write_audit(
+                request,
+                admin_context,
+                "admin.workflow.updated",
+                {"flow_id": flow.flowid, "changed_fields": changed_fields},
+            )
+        return Response(AdminFlowSerializer(flow).data)
+
+
+class AdminWorkflowStatusCreateView(AdminWorkflowBaseView):
+    @extend_schema(
+        request=AdminStatusWriteSerializer,
+        responses={201: AdminStatusSerializer},
+        examples=[
+            OpenApiExample(
+                "Create status",
+                value={"name": "Waiting", "category": "waiting", "is_terminal": False},
+                request_only=True,
+            )
+        ],
+        description="Create a status in a tenant-scoped workflow.",
+    )
+    def post(self, request, flow_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        flow = self.get_flow(request, flow_id)
+        serializer = AdminStatusWriteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.admin_validation_response(serializer)
+
+        with transaction.atomic():
+            status_obj = Status.objects.create(
+                statusid=uuid.uuid4(),
+                tenantid_id=request.tenant_id,
+                flowid=flow,
+                name=serializer.validated_data["name"],
+                category=serializer.validated_data["category"],
+                isterminal=serializer.validated_data.get("is_terminal", False),
+                createdat=timezone.now(),
+            )
+            self.write_audit(
+                request,
+                admin_context,
+                "admin.status.created",
+                {
+                    "flow_id": flow.flowid,
+                    "status_id": status_obj.statusid,
+                    "name": status_obj.name,
+                },
+            )
+        return Response(
+            AdminStatusSerializer(status_obj).data, status=status.HTTP_201_CREATED
+        )
+
+
+class AdminWorkflowStatusDetailView(AdminWorkflowBaseView):
+    @extend_schema(
+        request=AdminStatusWriteSerializer,
+        responses=AdminStatusSerializer,
+        description="Update a status in a tenant-scoped workflow.",
+    )
+    def patch(self, request, flow_id, status_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        flow = self.get_flow(request, flow_id)
+        status_obj = self.get_status(request, flow, status_id)
+        serializer = AdminStatusWriteSerializer(data=request.data, partial=True)
+        if not serializer.is_valid():
+            return self.admin_validation_response(serializer)
+
+        field_map = {
+            "name": "name",
+            "category": "category",
+            "is_terminal": "isterminal",
+        }
+        changed_fields = []
+        for public_field, model_field in field_map.items():
+            if public_field in serializer.validated_data:
+                setattr(
+                    status_obj, model_field, serializer.validated_data[public_field]
+                )
+                changed_fields.append(model_field)
+        with transaction.atomic():
+            if changed_fields:
+                status_obj.save(update_fields=changed_fields)
+            self.write_audit(
+                request,
+                admin_context,
+                "admin.status.updated",
+                {
+                    "flow_id": flow.flowid,
+                    "status_id": status_obj.statusid,
+                    "changed_fields": changed_fields,
+                },
+            )
+        return Response(AdminStatusSerializer(status_obj).data)
+
+
+class AdminWorkflowTransitionCreateView(AdminWorkflowBaseView):
+    @extend_schema(
+        request=AdminTransitionWriteSerializer,
+        responses={201: AdminTransitionSerializer},
+        examples=[
+            OpenApiExample(
+                "Create transition",
+                value={
+                    "from_status_id": "22222222-2222-2222-2222-222222222222",
+                    "to_status_id": "33333333-3333-3333-3333-333333333333",
+                    "guard_roles_json": "[]",
+                    "guard_perms_json": "[]",
+                    "auto_rules": "{}",
+                },
+                request_only=True,
+            )
+        ],
+        description="Create a workflow transition scoped through its workflow.",
+    )
+    def post(self, request, flow_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        flow = self.get_flow(request, flow_id)
+        serializer = AdminTransitionWriteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.admin_validation_response(serializer)
+        from_status, to_status = self.transition_statuses(request, flow, serializer)
+
+        with transaction.atomic():
+            transition = Transition.objects.create(
+                transitionid=uuid.uuid4(),
+                flowid=flow,
+                fromstatusid=from_status,
+                tostatusid=to_status,
+                guardrolesjson=serializer.validated_data.get("guard_roles_json"),
+                guardpermsjson=serializer.validated_data.get("guard_perms_json"),
+                autorules=serializer.validated_data.get("auto_rules"),
+                createdat=timezone.now(),
+            )
+            self.write_audit(
+                request,
+                admin_context,
+                "admin.transition.created",
+                {
+                    "flow_id": flow.flowid,
+                    "transition_id": transition.transitionid,
+                    "from_status_id": from_status.statusid,
+                    "to_status_id": to_status.statusid,
+                },
+            )
+        return Response(
+            AdminTransitionSerializer(transition).data, status=status.HTTP_201_CREATED
+        )
+
+
+class AdminWorkflowTransitionDetailView(AdminWorkflowBaseView):
+    @extend_schema(
+        request=AdminTransitionWriteSerializer,
+        responses=AdminTransitionSerializer,
+        description="Update a workflow transition scoped through its workflow.",
+    )
+    def patch(self, request, flow_id, transition_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        flow = self.get_flow(request, flow_id)
+        transition = self.get_transition(flow, transition_id)
+        serializer = AdminTransitionWriteSerializer(data=request.data, partial=True)
+        if not serializer.is_valid():
+            return self.admin_validation_response(serializer)
+
+        changed_fields = []
+        if "from_status_id" in serializer.validated_data:
+            transition.fromstatusid = self.get_status(
+                request, flow, serializer.validated_data["from_status_id"]
+            )
+            changed_fields.append("fromstatusid")
+        if "to_status_id" in serializer.validated_data:
+            transition.tostatusid = self.get_status(
+                request, flow, serializer.validated_data["to_status_id"]
+            )
+            changed_fields.append("tostatusid")
+        field_map = {
+            "guard_roles_json": "guardrolesjson",
+            "guard_perms_json": "guardpermsjson",
+            "auto_rules": "autorules",
+        }
+        for public_field, model_field in field_map.items():
+            if public_field in serializer.validated_data:
+                setattr(
+                    transition, model_field, serializer.validated_data[public_field]
+                )
+                changed_fields.append(model_field)
+        with transaction.atomic():
+            if changed_fields:
+                transition.save(update_fields=changed_fields)
+            self.write_audit(
+                request,
+                admin_context,
+                "admin.transition.updated",
+                {
+                    "flow_id": flow.flowid,
+                    "transition_id": transition.transitionid,
+                    "changed_fields": changed_fields,
+                },
+            )
+        return Response(AdminTransitionSerializer(transition).data)
 
 
 class CommentViewSet(

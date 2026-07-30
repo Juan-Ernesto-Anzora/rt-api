@@ -460,7 +460,7 @@ class Activity(models.Model):
         "Tenant", models.DO_NOTHING, db_column="TenantId"
     )  # Field name made lowercase.
     requestid = models.ForeignKey(
-        "Request", models.DO_NOTHING, db_column="RequestId"
+        "Request", models.DO_NOTHING, db_column="RequestId", blank=True, null=True
     )  # Field name made lowercase.
     actorid = models.ForeignKey(
         "User", models.DO_NOTHING, db_column="ActorId", blank=True, null=True
