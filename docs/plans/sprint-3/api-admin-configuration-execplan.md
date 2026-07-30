@@ -216,13 +216,37 @@ poetry run isort . --check --diff
 git diff --check
 ```
 
-### Milestone 2: Admin Workflow Read APIs
+### Milestone 2: Admin Workflow APIs
 
-Add read-only tenant-scoped admin endpoints for flows, statuses, and transitions. This milestone is not part of Day 1-2 implementation unless explicitly approved after Milestone 1 review.
+Add tenant-scoped workflow administration endpoints guarded by the baseline
+`admin.read` admin permission:
 
-### Milestone 3: Admin Workflow Write APIs
+- `GET /api/admin/workflows/`
+- `POST /api/admin/workflows/`
+- `GET /api/admin/workflows/{flow_id}/`
+- `PATCH /api/admin/workflows/{flow_id}/`
+- `POST /api/admin/workflows/{flow_id}/statuses/`
+- `PATCH /api/admin/workflows/{flow_id}/statuses/{status_id}/`
+- `POST /api/admin/workflows/{flow_id}/transitions/`
+- `PATCH /api/admin/workflows/{flow_id}/transitions/{transition_id}/`
 
-Add guarded create/update/archive behavior for flows, statuses, and transitions, with audit events. Deferred until admin foundation is reviewed.
+Acceptance criteria:
+
+- Workflow list/detail/create/update responses use public fields such as
+  `flow_id`, `created_at`, `status_id`, `transition_id`, `from_status_id`,
+  `to_status_id`, `guard_roles_json`, `guard_perms_json`, and `auto_rules`.
+- All reads and writes are scoped to `request.tenant_id`.
+- Status writes require the parent flow to belong to the active tenant.
+- Transition writes require the parent flow to belong to the active tenant and
+  both endpoint statuses to belong to that same tenant-scoped flow.
+- Non-admin callers receive clean JSON `403` responses.
+- Cross-tenant flow/status/transition access returns clean `404` responses.
+- Every admin create/update writes an audit `Activity` row with an
+  `admin.workflow.*`, `admin.status.*`, or `admin.transition.*` type.
+- Delete/archive endpoints are not exposed until the SQL schema has an
+  explicit soft-delete or active flag for workflows, statuses, and transitions.
+- Generated OpenAPI includes the new endpoints and examples for create payloads.
+- Focused positive and negative pytest coverage is added.
 
 ### Milestone 4: Admin User and Membership APIs
 
@@ -371,6 +395,30 @@ Day 1-2 acceptance:
 - [x] Generated OpenAPI verified in focused tests.
 - [ ] Postman validation completed.
 - [x] Full local checks passed.
+- [x] Sprint 3 Day 3-4 workflow admin branch checked out:
+  `feat/api-admin-workflows`.
+- [x] Workflow admin serializers added with clean public field names.
+- [x] Tenant-scoped workflow list/create/detail/update endpoints added.
+- [x] Tenant-scoped status create/update endpoints added.
+- [x] Tenant-scoped transition create/update endpoints added.
+- [x] Admin permission checks applied to every workflow admin endpoint.
+- [x] Admin workflow write audit events added.
+- [x] Focused workflow admin tests added for happy path, 403, 404,
+  cross-tenant behavior, and generated OpenAPI paths.
+- [x] Full Day 3-4 local checks passed.
+- [x] Day 3-4 verification reproduced admin permission resolution against the
+  live ACME tenant and confirmed the current API returns `200` for the admin
+  permissions and workflow list endpoints.
+- [x] Existing-database upgrade added for nullable `Activity.RequestId` and
+  idempotent Sprint 3 admin permission seeds.
+- [x] Successful-path tests cover workflow list/create/detail/update, status
+  create/update, and transition create/update; negative tests cover permission
+  denial and cross-tenant 404 behavior.
+- [x] SQL Server parse-only validation passed for
+  `db/upgrade-sprint3-admin-workflows.sql`.
+- [x] Post-review full API checks passed on 2026-07-29.
+- [ ] Apply `db/upgrade-sprint3-admin-workflows.sql` to the local development
+  database before manually testing workflow create/update writes.
 
 ## Surprises & Discoveries
 
@@ -382,6 +430,31 @@ Day 1-2 acceptance:
 - 2026-06-10: Django 5.2.5 is installed, so unmanaged `MembershipRole` and `RolePermission` can use `models.CompositePrimaryKey` instead of raw SQL for the join tables.
 - 2026-06-10: Existing tests favor manager monkeypatches and generated schema checks, so admin guardrail tests can cover RBAC behavior without depending on a live SQL Server.
 - 2026-06-12: Postman/manual validation showed the database seed and effective RT Admin permissions use `admin.read`; `admin.access` was not seeded and caused valid admins to receive `403`.
+- 2026-06-12: `Flow`, `Status`, and `Transition` do not currently have
+  `IsActive`, `ArchivedAt`, or `UpdatedAt` columns, so Day 3-4 should avoid
+  delete/archive endpoints instead of pretending hard deletes are safe.
+- 2026-06-12: `Activity.RequestId` was modeled and scripted as required, but
+  admin configuration audit events are tenant-level and not tied to a request.
+  The Day 3-4 audit implementation requires nullable `RequestId` for those
+  events while preserving request-linked activity behavior.
+- 2026-07-29: Live ACME verification confirmed `admin@example.com` has the
+  `RT Admin` role plus `admin.read` and `admin.workflows`; the current API
+  returns `200` from `/api/admin/me/permissions/` and
+  `/api/admin/workflows/` for that identity.
+- 2026-07-29: The web route guard redirects before calling the admin API
+  because it derives admin access only from JWT claims and does not recognize
+  `admin.read`. The API's tenant-scoped permission endpoint is working; the
+  route-guard correction belongs to the web repository.
+- 2026-07-29: The live `Activity.RequestId` column remains `NOT NULL`, so all
+  admin workflow writes would fail while creating their required tenant-level
+  audit event. The fresh-create SQL was not enough for existing databases.
+- 2026-07-29: The earlier unmanaged-model edit made `Comment.requestid`
+  nullable instead of `Activity.requestid`. Regression coverage now asserts
+  that comments remain request-bound and admin audit activity can be
+  tenant-level.
+- 2026-07-29: The original permission seed was guarded only by the existence
+  of `requests.read`, which caused all later permission codes to be skipped on
+  an existing database. Permission seeding is now idempotent per code.
 
 ## Decision Log
 
@@ -395,6 +468,24 @@ Day 1-2 acceptance:
 - 2026-06-10: Map Django auth users to `dbo.User` by email, falling back to username only when it looks like an email address.
 - 2026-06-10: Keep admin foundation code in `apps/rt/services/admin_permissions.py` plus small APIViews in `apps/rt/views.py` to minimize new module sprawl for Day 1-2.
 - 2026-06-10: Keep `/api/admin/audit/` read-only and backed by tenant-scoped `Activity` rows with optional safe filters.
+- 2026-06-12: Use `/api/admin/workflows/...` as the workflow admin route
+  family so it stays separate from public lookup endpoints under `/api/flows/`.
+- 2026-06-12: Continue using `admin.read` as the baseline workflow admin
+  permission until finer write permissions are seeded and the web admin UI can
+  branch on them safely.
+- 2026-06-12: Return workflow detail with nested `statuses` and `transitions`
+  so the future admin workflow editor can initialize from one tenant-scoped
+  read.
+- 2026-06-12: Do not expose delete endpoints for workflow configuration in
+  this milestone; schema-backed soft-delete can be added later without risking
+  existing request dependencies.
+- 2026-07-29: Keep `admin.read` as the baseline API gate. Do not encode
+  tenant-effective roles or permissions into the tenant-agnostic SimpleJWT
+  token; the web admin guard should consume
+  `/api/admin/me/permissions/` using the active `X-Tenant`.
+- 2026-07-29: Add a separate idempotent SQL upgrade for existing databases
+  instead of requiring destructive database recreation to support admin audit
+  writes.
 
 ## Outcomes & Retrospective
 
@@ -405,3 +496,26 @@ Milestone 1 implementation is in progress on `feat/api-admin-foundation`:
 - Added `GET /api/admin/me/permissions/` and `GET /api/admin/audit/`.
 - Added focused tests for public response fields, denied users, missing tenant, missing permissions, tenant-scoped audit, safe filters, and generated OpenAPI paths.
 - Focused admin pytest and full local checks passed. Postman validation remains.
+
+Milestone 2 implementation is in progress on `feat/api-admin-workflows`:
+
+- Added admin workflow serializers for flows, statuses, and transitions.
+- Added guarded tenant-scoped workflow admin APIViews and URL routes.
+- Added admin write audit events for workflow/status/transition create/update.
+- Updated the fresh database creation script and unmanaged `Activity` model so
+  tenant-level admin audit rows can have `request_id=null`.
+- Added `db/upgrade-sprint3-admin-workflows.sql` so existing databases can
+  adopt the nullable admin-audit relationship without recreation.
+- Corrected the unmanaged model mapping so `Activity.requestid` is nullable
+  and `Comment.requestid` remains required.
+- Made fresh permission seeding idempotent and added the `admin.read` and
+  `admin.audit.read` baseline permissions.
+- Expanded successful-path coverage across all eight workflow admin operations.
+- Post-review verification passed: Django system check, the full pytest suite,
+  Ruff, Black, isort, SQL Server parse-only validation, and `git diff --check`.
+- Added focused workflow admin tests and verified them with
+  `poetry run pytest tests\test_admin_workflows.py -q`.
+- Full Day 3-4 checks passed: `poetry run python manage.py check`,
+  `poetry run pytest -q`, `poetry run ruff check .`,
+  `poetry run black . --check`, `poetry run isort . --check --diff`, and
+  `git diff --check`.

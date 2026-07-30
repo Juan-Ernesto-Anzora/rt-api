@@ -383,6 +383,105 @@ class AdminAuditSerializer(serializers.ModelSerializer):
         ]
 
 
+class AdminFlowSerializer(serializers.ModelSerializer):
+    flow_id = serializers.UUIDField(source="flowid", read_only=True)
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+
+    class Meta:
+        model = Flow
+        fields = ["flow_id", "name", "description", "created_at"]
+
+
+class AdminFlowWriteSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=100, trim_whitespace=True)
+    description = serializers.CharField(
+        max_length=400, required=False, allow_blank=True, allow_null=True
+    )
+
+    def validate_name(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Name is required.")
+        return value.strip()
+
+
+class AdminStatusSerializer(serializers.ModelSerializer):
+    status_id = serializers.UUIDField(source="statusid", read_only=True)
+    flow_id = serializers.UUIDField(source="flowid_id", read_only=True)
+    is_terminal = serializers.BooleanField(source="isterminal", read_only=True)
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+
+    class Meta:
+        model = Status
+        fields = [
+            "status_id",
+            "flow_id",
+            "name",
+            "category",
+            "is_terminal",
+            "created_at",
+        ]
+
+
+class AdminStatusWriteSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=50, trim_whitespace=True)
+    category = serializers.CharField(max_length=20, trim_whitespace=True)
+    is_terminal = serializers.BooleanField(required=False, default=False)
+
+    def validate_name(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Name is required.")
+        return value.strip()
+
+    def validate_category(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Category is required.")
+        return value.strip().lower()
+
+
+class AdminTransitionSerializer(serializers.ModelSerializer):
+    transition_id = serializers.UUIDField(source="transitionid", read_only=True)
+    flow_id = serializers.UUIDField(source="flowid_id", read_only=True)
+    from_status_id = serializers.UUIDField(source="fromstatusid_id", read_only=True)
+    to_status_id = serializers.UUIDField(source="tostatusid_id", read_only=True)
+    guard_roles_json = serializers.CharField(
+        source="guardrolesjson", read_only=True, allow_null=True
+    )
+    guard_perms_json = serializers.CharField(
+        source="guardpermsjson", read_only=True, allow_null=True
+    )
+    auto_rules = serializers.CharField(
+        source="autorules", read_only=True, allow_null=True
+    )
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+
+    class Meta:
+        model = Transition
+        fields = [
+            "transition_id",
+            "flow_id",
+            "from_status_id",
+            "to_status_id",
+            "guard_roles_json",
+            "guard_perms_json",
+            "auto_rules",
+            "created_at",
+        ]
+
+
+class AdminTransitionWriteSerializer(serializers.Serializer):
+    from_status_id = serializers.UUIDField()
+    to_status_id = serializers.UUIDField()
+    guard_roles_json = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
+    )
+    guard_perms_json = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
+    )
+    auto_rules = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
+    )
+
+
 class DashboardSummarySerializer(serializers.Serializer):
     open = serializers.IntegerField()
     in_progress = serializers.IntegerField()

@@ -259,11 +259,11 @@ CREATE TABLE dbo.Attachment (
 );
 CREATE INDEX IX_Attachment_Request ON dbo.Attachment(RequestId);
 
--- Activity cascades from Request only
+-- Activity may reference a Request, but admin configuration audit events are tenant-level.
 CREATE TABLE dbo.Activity (
   ActivityId UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_ActivityId DEFAULT NEWSEQUENTIALID(),
   TenantId UNIQUEIDENTIFIER NOT NULL,
-  RequestId UNIQUEIDENTIFIER NOT NULL,
+  RequestId UNIQUEIDENTIFIER NULL,
   ActorId UNIQUEIDENTIFIER NULL,
   Type NVARCHAR(50) NOT NULL,
   Payload NVARCHAR(MAX) NULL,
@@ -352,12 +352,19 @@ KEY INDEX PK_Attachment ON rt_catalog WITH CHANGE_TRACKING AUTO;
 -------------------------------------------------------------------------------
 -- SEED minimal permissions
 -------------------------------------------------------------------------------
-IF NOT EXISTS (SELECT 1 FROM dbo.Permission WHERE Code='requests.read')
-  INSERT INTO dbo.Permission(Code, Description) VALUES
+MERGE dbo.Permission AS target
+USING (
+  VALUES
     (N'requests.read', N'Read requests'),
     (N'requests.write', N'Create/Update requests'),
     (N'requests.transition', N'Change request status'),
     (N'comments.write', N'Add comments'),
     (N'attachments.write', N'Upload attachments'),
+    (N'admin.read', N'Access tenant administration'),
+    (N'admin.audit.read', N'Read tenant audit activity'),
     (N'admin.users', N'Manage users'),
-    (N'admin.workflows', N'Manage workflows');
+    (N'admin.workflows', N'Manage workflows')
+) AS source(Code, Description)
+ON target.Code = source.Code
+WHEN NOT MATCHED THEN
+  INSERT (Code, Description) VALUES (source.Code, source.Description);

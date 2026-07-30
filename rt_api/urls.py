@@ -12,6 +12,12 @@ from apps.common import views as common_views
 from apps.rt.views import (
     AdminAuditView,
     AdminPermissionsView,
+    AdminWorkflowDetailView,
+    AdminWorkflowListCreateView,
+    AdminWorkflowStatusCreateView,
+    AdminWorkflowStatusDetailView,
+    AdminWorkflowTransitionCreateView,
+    AdminWorkflowTransitionDetailView,
     AttachmentFinalizeView,
     AttachmentInitView,
     AttachmentViewSet,
@@ -65,6 +71,36 @@ urlpatterns = [
         "api/admin/audit/",
         AdminAuditView.as_view(),
         name="admin-audit",
+    ),
+    path(
+        "api/admin/workflows/",
+        AdminWorkflowListCreateView.as_view(),
+        name="admin-workflows",
+    ),
+    path(
+        "api/admin/workflows/<uuid:flow_id>/",
+        AdminWorkflowDetailView.as_view(),
+        name="admin-workflow-detail",
+    ),
+    path(
+        "api/admin/workflows/<uuid:flow_id>/statuses/",
+        AdminWorkflowStatusCreateView.as_view(),
+        name="admin-workflow-statuses",
+    ),
+    path(
+        "api/admin/workflows/<uuid:flow_id>/statuses/<uuid:status_id>/",
+        AdminWorkflowStatusDetailView.as_view(),
+        name="admin-workflow-status-detail",
+    ),
+    path(
+        "api/admin/workflows/<uuid:flow_id>/transitions/",
+        AdminWorkflowTransitionCreateView.as_view(),
+        name="admin-workflow-transitions",
+    ),
+    path(
+        "api/admin/workflows/<uuid:flow_id>/transitions/<uuid:transition_id>/",
+        AdminWorkflowTransitionDetailView.as_view(),
+        name="admin-workflow-transition-detail",
     ),
     path("api/schema", SpectacularAPIView.as_view(), name="schema"),
     path(
