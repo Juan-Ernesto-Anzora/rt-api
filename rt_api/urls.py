@@ -11,7 +11,18 @@ from rest_framework_simplejwt.views import (
 from apps.common import views as common_views
 from apps.rt.views import (
     AdminAuditView,
+    AdminMembershipDetailView,
+    AdminMembershipListCreateView,
+    AdminMembershipRoleAssignView,
+    AdminMembershipRoleDetailView,
+    AdminPermissionListView,
     AdminPermissionsView,
+    AdminRoleDetailView,
+    AdminRoleListCreateView,
+    AdminRolePermissionAssignView,
+    AdminRolePermissionDetailView,
+    AdminUserDetailView,
+    AdminUserListCreateView,
     AdminWorkflowDetailView,
     AdminWorkflowListCreateView,
     AdminWorkflowStatusCreateView,
@@ -71,6 +82,61 @@ urlpatterns = [
         "api/admin/audit/",
         AdminAuditView.as_view(),
         name="admin-audit",
+    ),
+    path(
+        "api/admin/users/",
+        AdminUserListCreateView.as_view(),
+        name="admin-users",
+    ),
+    path(
+        "api/admin/users/<uuid:user_id>/",
+        AdminUserDetailView.as_view(),
+        name="admin-user-detail",
+    ),
+    path(
+        "api/admin/memberships/",
+        AdminMembershipListCreateView.as_view(),
+        name="admin-memberships",
+    ),
+    path(
+        "api/admin/memberships/<uuid:membership_id>/",
+        AdminMembershipDetailView.as_view(),
+        name="admin-membership-detail",
+    ),
+    path(
+        "api/admin/memberships/<uuid:membership_id>/roles/",
+        AdminMembershipRoleAssignView.as_view(),
+        name="admin-membership-roles",
+    ),
+    path(
+        "api/admin/memberships/<uuid:membership_id>/roles/<uuid:role_id>/",
+        AdminMembershipRoleDetailView.as_view(),
+        name="admin-membership-role-detail",
+    ),
+    path(
+        "api/admin/roles/",
+        AdminRoleListCreateView.as_view(),
+        name="admin-roles",
+    ),
+    path(
+        "api/admin/roles/<uuid:role_id>/",
+        AdminRoleDetailView.as_view(),
+        name="admin-role-detail",
+    ),
+    path(
+        "api/admin/permissions/",
+        AdminPermissionListView.as_view(),
+        name="admin-permissions",
+    ),
+    path(
+        "api/admin/roles/<uuid:role_id>/permissions/",
+        AdminRolePermissionAssignView.as_view(),
+        name="admin-role-permissions",
+    ),
+    path(
+        "api/admin/roles/<uuid:role_id>/permissions/<str:permission_code>/",
+        AdminRolePermissionDetailView.as_view(),
+        name="admin-role-permission-detail",
     ),
     path(
         "api/admin/workflows/",

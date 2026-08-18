@@ -4,6 +4,9 @@ from apps.rt.models import Membership, Membershiprole, Rolepermission, User
 
 ADMIN_ACCESS_PERMISSION = "admin.read"
 ADMIN_AUDIT_READ_PERMISSION = "admin.audit.read"
+ADMIN_USERS_PERMISSION = "admin.users"
+ADMIN_ROLES_PERMISSION = "admin.roles"
+ADMIN_PERMISSIONS_PERMISSION = "admin.permissions"
 
 
 class AdminPermissionError(Exception):
@@ -110,3 +113,10 @@ def permission_denied():
         message="You do not have permission to access this admin resource.",
         status_code=403,
     )
+
+
+def require_admin_permissions(context, *permission_codes):
+    required = {ADMIN_ACCESS_PERMISSION, *permission_codes}
+    if not required.issubset(set(context.permissions)):
+        raise permission_denied()
+    return context

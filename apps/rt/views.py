@@ -23,7 +23,9 @@ from .models import (
     Comment,
     Flow,
     Membership,
+    Permission,
     Request,
+    Role,
     Status,
     Transition,
     User,
@@ -32,13 +34,25 @@ from .search import SearchValidationError, search_requests
 from .serializers import (
     ActivitySerializer,
     AdminAuditSerializer,
+    AdminDirectoryUserSerializer,
     AdminFlowSerializer,
     AdminFlowWriteSerializer,
+    AdminMembershipCreateSerializer,
+    AdminMembershipSerializer,
+    AdminMembershipUpdateSerializer,
+    AdminPermissionAssignmentSerializer,
+    AdminPermissionCatalogueSerializer,
     AdminPermissionsSerializer,
+    AdminRoleAssignmentSerializer,
+    AdminRoleSerializer,
+    AdminRoleWriteSerializer,
     AdminStatusSerializer,
     AdminStatusWriteSerializer,
     AdminTransitionSerializer,
     AdminTransitionWriteSerializer,
+    AdminUserCreateResponseSerializer,
+    AdminUserCreateSerializer,
+    AdminUserUpdateSerializer,
     AttachmentFinalizeRequestSerializer,
     AttachmentInitRequestSerializer,
     AttachmentInitResponseSerializer,
@@ -55,11 +69,32 @@ from .serializers import (
     TransitionLookupSerializer,
     UserLookupSerializer,
 )
+from .services.admin_directory import (
+    AdminDirectoryError,
+    assign_permission,
+    assign_role,
+    create_membership,
+    create_role,
+    create_user_with_membership,
+    remove_membership,
+    remove_permission,
+    remove_role,
+    tenant_membership,
+    tenant_role,
+    tenant_user,
+    update_membership,
+    update_role,
+    update_user,
+)
 from .services.admin_permissions import (
     ADMIN_ACCESS_PERMISSION,
     ADMIN_AUDIT_READ_PERMISSION,
+    ADMIN_PERMISSIONS_PERMISSION,
+    ADMIN_ROLES_PERMISSION,
+    ADMIN_USERS_PERMISSION,
     AdminPermissionError,
     get_admin_context,
+    require_admin_permissions,
 )
 from .services.notification_service import (
     notify_comment_added,
@@ -519,6 +554,521 @@ class AdminAuditView(APIView):
         page = paginator.paginate_queryset(queryset, request, view=self)
         serializer = AdminAuditSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+
+class AdminDirectoryBaseView(APIView):
+    permission_classes = [IsAuthenticated]
+    required_permission = ADMIN_ACCESS_PERMISSION
+
+    def get_admin_context_or_response(self, request):
+        try:
+            context = get_admin_context(
+                request, required_permission=ADMIN_ACCESS_PERMISSION
+            )
+            return require_admin_permissions(context, self.required_permission)
+        except AdminPermissionError as exc:
+            return admin_error_response(exc)
+
+    def validation_response(self, serializer):
+        return validation_error_response(serializer.errors)
+
+    def directory_error_response(self, exc):
+        return admin_error_response(exc)
+
+    def paginate(self, request, queryset, serializer_class):
+        paginator = AdminDirectoryPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        return paginator.get_paginated_response(serializer_class(page, many=True).data)
+
+    def safe_order(self, request, queryset, fields, default):
+        requested = request.query_params.get("sort", default)
+        descending = requested.startswith("-")
+        public_field = requested[1:] if descending else requested
+        model_field = fields.get(public_field, fields[default.lstrip("-")])
+        if descending:
+            model_field = f"-{model_field}"
+        return queryset.order_by(model_field)
+
+
+class AdminDirectoryPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class AdminUserListCreateView(AdminDirectoryBaseView):
+    required_permission = ADMIN_USERS_PERMISSION
+
+    @extend_schema(
+        responses=AdminDirectoryUserSerializer(many=True),
+        parameters=[
+            OpenApiParameter("search", str, description="Email or display name."),
+            OpenApiParameter("is_active", bool),
+            OpenApiParameter(
+                "sort", str, description="display_name, email, created_at"
+            ),
+        ],
+        description="List domain users who belong to the current tenant.",
+    )
+    def get(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        queryset = User.objects.filter(
+            membership__tenantid_id=request.tenant_id
+        ).distinct()
+        search = (request.query_params.get("search") or "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(email__icontains=search) | Q(displayname__icontains=search)
+            )
+        is_active = request.query_params.get("is_active")
+        if is_active in {"true", "false"}:
+            queryset = queryset.filter(isactive=is_active == "true")
+        queryset = self.safe_order(
+            request,
+            queryset,
+            {
+                "display_name": "displayname",
+                "email": "email",
+                "created_at": "createdat",
+            },
+            "display_name",
+        )
+        return self.paginate(request, queryset, AdminDirectoryUserSerializer)
+
+    @extend_schema(
+        request=AdminUserCreateSerializer,
+        responses={201: AdminUserCreateResponseSerializer},
+        examples=[
+            OpenApiExample(
+                "Create domain user",
+                value={
+                    "email": "agent@example.com",
+                    "display_name": "Example Agent",
+                    "employee_code": "A-100",
+                    "is_default_tenant": True,
+                },
+                request_only=True,
+            )
+        ],
+        description=(
+            "Create a Request Tracker domain user and current-tenant membership. "
+            "This does not create Django authentication credentials."
+        ),
+    )
+    def post(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminUserCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            user, membership = create_user_with_membership(
+                request.tenant_id,
+                admin_context.user.user_id,
+                serializer.validated_data,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        response = AdminUserCreateResponseSerializer(
+            {"user": user, "membership": membership}
+        )
+        return Response(response.data, status=status.HTTP_201_CREATED)
+
+
+class AdminUserDetailView(AdminDirectoryBaseView):
+    required_permission = ADMIN_USERS_PERMISSION
+
+    @extend_schema(
+        responses=AdminDirectoryUserSerializer,
+        description="Return a current-tenant domain user.",
+    )
+    def get(self, request, user_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            user, _membership = tenant_user(request.tenant_id, user_id)
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminDirectoryUserSerializer(user).data)
+
+    @extend_schema(
+        request=AdminUserUpdateSerializer,
+        responses=AdminDirectoryUserSerializer,
+        description="Update or deactivate a current-tenant domain user.",
+    )
+    def patch(self, request, user_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminUserUpdateSerializer(data=request.data, partial=True)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            user = update_user(
+                request.tenant_id,
+                admin_context.user.user_id,
+                user_id,
+                serializer.validated_data,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminDirectoryUserSerializer(user).data)
+
+
+class AdminMembershipListCreateView(AdminDirectoryBaseView):
+    required_permission = ADMIN_USERS_PERMISSION
+
+    @extend_schema(
+        responses=AdminMembershipSerializer(many=True),
+        parameters=[
+            OpenApiParameter("user_id", str),
+            OpenApiParameter("sort", str, description="display_name or created_at"),
+        ],
+        description="List memberships for the current tenant.",
+    )
+    def get(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        queryset = Membership.objects.filter(
+            tenantid_id=request.tenant_id
+        ).select_related("userid")
+        user_id = request.query_params.get("user_id")
+        if user_id:
+            try:
+                user_id = uuid.UUID(user_id)
+            except ValueError:
+                return validation_error_response({"user_id": ["Must be a valid UUID."]})
+            queryset = queryset.filter(userid_id=user_id)
+        queryset = self.safe_order(
+            request,
+            queryset,
+            {"display_name": "userid__displayname", "created_at": "createdat"},
+            "display_name",
+        )
+        return self.paginate(request, queryset, AdminMembershipSerializer)
+
+    @extend_schema(
+        request=AdminMembershipCreateSerializer,
+        responses={201: AdminMembershipSerializer},
+        examples=[
+            OpenApiExample(
+                "Add tenant membership",
+                value={
+                    "user_id": "11111111-1111-1111-1111-111111111111",
+                    "is_default_tenant": False,
+                },
+                request_only=True,
+            )
+        ],
+        description="Add an existing active domain user to the current tenant.",
+    )
+    def post(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminMembershipCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            user = User.objects.get(userid=serializer.validated_data["user_id"])
+        except User.DoesNotExist:
+            return Response(
+                {
+                    "code": "not_found",
+                    "message": "Domain user not found.",
+                    "details": [],
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        try:
+            membership = create_membership(
+                request.tenant_id,
+                admin_context.user.user_id,
+                user,
+                serializer.validated_data.get("is_default_tenant", False),
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(
+            AdminMembershipSerializer(membership).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminMembershipDetailView(AdminDirectoryBaseView):
+    required_permission = ADMIN_USERS_PERMISSION
+
+    @extend_schema(
+        responses=AdminMembershipSerializer,
+        description="Return a current-tenant membership.",
+    )
+    def get(self, request, membership_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            membership = tenant_membership(request.tenant_id, membership_id)
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminMembershipSerializer(membership).data)
+
+    @extend_schema(
+        request=AdminMembershipUpdateSerializer,
+        responses=AdminMembershipSerializer,
+        description="Update a current-tenant membership.",
+    )
+    def patch(self, request, membership_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminMembershipUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            membership = update_membership(
+                request.tenant_id,
+                admin_context.user.user_id,
+                membership_id,
+                serializer.validated_data["is_default_tenant"],
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminMembershipSerializer(membership).data)
+
+    @extend_schema(
+        responses={204: None},
+        description="Remove a current-tenant membership with admin lockout protection.",
+    )
+    def delete(self, request, membership_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            remove_membership(
+                request.tenant_id,
+                admin_context.user.user_id,
+                membership_id,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminRoleListCreateView(AdminDirectoryBaseView):
+    required_permission = ADMIN_ROLES_PERMISSION
+
+    @extend_schema(
+        responses=AdminRoleSerializer(many=True),
+        parameters=[OpenApiParameter("sort", str, description="name or created_at")],
+        description="List roles for the current tenant.",
+    )
+    def get(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        queryset = Role.objects.filter(tenantid_id=request.tenant_id)
+        queryset = self.safe_order(
+            request,
+            queryset,
+            {"name": "name", "created_at": "createdat"},
+            "name",
+        )
+        return self.paginate(request, queryset, AdminRoleSerializer)
+
+    @extend_schema(
+        request=AdminRoleWriteSerializer,
+        responses={201: AdminRoleSerializer},
+        examples=[
+            OpenApiExample(
+                "Create role",
+                value={"name": "Escalation Lead", "description": "Handles escalations"},
+                request_only=True,
+            )
+        ],
+        description="Create a role for the current tenant.",
+    )
+    def post(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminRoleWriteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            role = create_role(
+                request.tenant_id,
+                admin_context.user.user_id,
+                serializer.validated_data,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminRoleSerializer(role).data, status=status.HTTP_201_CREATED)
+
+
+class AdminRoleDetailView(AdminDirectoryBaseView):
+    required_permission = ADMIN_ROLES_PERMISSION
+
+    @extend_schema(
+        responses=AdminRoleSerializer,
+        description="Return a current-tenant role and its permissions.",
+    )
+    def get(self, request, role_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            role = tenant_role(request.tenant_id, role_id)
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminRoleSerializer(role).data)
+
+    @extend_schema(
+        request=AdminRoleWriteSerializer,
+        responses=AdminRoleSerializer,
+        description="Update a current-tenant role.",
+    )
+    def patch(self, request, role_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminRoleWriteSerializer(data=request.data, partial=True)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            role = update_role(
+                request.tenant_id,
+                admin_context.user.user_id,
+                role_id,
+                serializer.validated_data,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminRoleSerializer(role).data)
+
+
+class AdminPermissionListView(AdminDirectoryBaseView):
+    required_permission = ADMIN_PERMISSIONS_PERMISSION
+
+    @extend_schema(
+        responses=AdminPermissionCatalogueSerializer(many=True),
+        description="Return the global permission catalogue for role configuration.",
+    )
+    def get(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        queryset = Permission.objects.all().order_by("code")
+        return self.paginate(request, queryset, AdminPermissionCatalogueSerializer)
+
+
+class AdminMembershipRoleAssignView(AdminDirectoryBaseView):
+    required_permission = ADMIN_ROLES_PERMISSION
+
+    @extend_schema(
+        request=AdminRoleAssignmentSerializer,
+        responses={201: AdminMembershipSerializer},
+        description="Assign a current-tenant role to a current-tenant membership.",
+    )
+    def post(self, request, membership_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminRoleAssignmentSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            assign_role(
+                request.tenant_id,
+                admin_context.user.user_id,
+                membership_id,
+                serializer.validated_data["role_id"],
+            )
+            membership = tenant_membership(request.tenant_id, membership_id)
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(
+            AdminMembershipSerializer(membership).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminMembershipRoleDetailView(AdminDirectoryBaseView):
+    required_permission = ADMIN_ROLES_PERMISSION
+
+    @extend_schema(
+        responses={204: None},
+        description="Remove a role assignment with final-admin protection.",
+    )
+    def delete(self, request, membership_id, role_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            remove_role(
+                request.tenant_id,
+                admin_context.user.user_id,
+                membership_id,
+                role_id,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminRolePermissionAssignView(AdminDirectoryBaseView):
+    required_permission = ADMIN_PERMISSIONS_PERMISSION
+
+    @extend_schema(
+        request=AdminPermissionAssignmentSerializer,
+        responses={201: AdminRoleSerializer},
+        description="Assign a catalogue permission to a current-tenant role.",
+    )
+    def post(self, request, role_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminPermissionAssignmentSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            assign_permission(
+                request.tenant_id,
+                admin_context.user.user_id,
+                role_id,
+                serializer.validated_data["permission_code"],
+            )
+            role = tenant_role(request.tenant_id, role_id)
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminRoleSerializer(role).data, status=status.HTTP_201_CREATED)
+
+
+class AdminRolePermissionDetailView(AdminDirectoryBaseView):
+    required_permission = ADMIN_PERMISSIONS_PERMISSION
+
+    @extend_schema(
+        responses={204: None},
+        description="Remove a role permission with final-admin protection.",
+    )
+    def delete(self, request, role_id, permission_code):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            remove_permission(
+                request.tenant_id,
+                admin_context.user.user_id,
+                role_id,
+                permission_code,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AdminWorkflowBaseView(APIView):
@@ -1258,7 +1808,7 @@ def admin_error_response(exc):
         {
             "code": exc.code,
             "message": exc.message,
-            "details": [],
+            "details": getattr(exc, "details", []),
         },
         status=exc.status_code,
     )
