@@ -6,7 +6,9 @@ from .models import (
     Comment,
     Flow,
     Membership,
+    Permission,
     Request,
+    Role,
     Status,
     Transition,
     User,
@@ -381,6 +383,179 @@ class AdminAuditSerializer(serializers.ModelSerializer):
             "payload",
             "created_at",
         ]
+
+
+class AdminDirectoryUserSerializer(serializers.ModelSerializer):
+    user_id = serializers.UUIDField(source="userid", read_only=True)
+    display_name = serializers.CharField(source="displayname", read_only=True)
+    employee_code = serializers.CharField(
+        source="employeecode", read_only=True, allow_null=True
+    )
+    avatar_url = serializers.CharField(
+        source="avatarurl", read_only=True, allow_null=True
+    )
+    is_active = serializers.BooleanField(source="isactive", read_only=True)
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+    updated_at = serializers.DateTimeField(
+        source="updatedat", read_only=True, allow_null=True
+    )
+
+    class Meta:
+        model = User
+        fields = [
+            "user_id",
+            "email",
+            "display_name",
+            "employee_code",
+            "avatar_url",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class AdminUserCreateSerializer(serializers.Serializer):
+    email = serializers.EmailField(max_length=320)
+    display_name = serializers.CharField(max_length=200, trim_whitespace=True)
+    employee_code = serializers.CharField(
+        max_length=50, required=False, allow_blank=True, allow_null=True
+    )
+    avatar_url = serializers.CharField(
+        max_length=400, required=False, allow_blank=True, allow_null=True
+    )
+    is_default_tenant = serializers.BooleanField(required=False, default=False)
+
+    def validate_display_name(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Display name is required.")
+        return value.strip()
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+
+class AdminUserUpdateSerializer(serializers.Serializer):
+    email = serializers.EmailField(max_length=320, required=False)
+    display_name = serializers.CharField(
+        max_length=200, trim_whitespace=True, required=False
+    )
+    employee_code = serializers.CharField(
+        max_length=50, required=False, allow_blank=True, allow_null=True
+    )
+    avatar_url = serializers.CharField(
+        max_length=400, required=False, allow_blank=True, allow_null=True
+    )
+    is_active = serializers.BooleanField(required=False)
+
+    def validate_display_name(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Display name is required.")
+        return value.strip()
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+
+class AdminPermissionCatalogueSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Permission
+        fields = ["code", "description"]
+
+
+class AdminRoleSummarySerializer(serializers.ModelSerializer):
+    role_id = serializers.UUIDField(source="roleid", read_only=True)
+
+    class Meta:
+        model = Role
+        fields = ["role_id", "name"]
+
+
+class AdminMembershipSerializer(serializers.ModelSerializer):
+    membership_id = serializers.UUIDField(source="membershipid", read_only=True)
+    tenant_id = serializers.UUIDField(source="tenantid_id", read_only=True)
+    user = AdminDirectoryUserSerializer(source="userid", read_only=True)
+    is_default_tenant = serializers.BooleanField(
+        source="isdefaulttenant", read_only=True
+    )
+    roles = serializers.SerializerMethodField()
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+
+    class Meta:
+        model = Membership
+        fields = [
+            "membership_id",
+            "tenant_id",
+            "user",
+            "is_default_tenant",
+            "roles",
+            "created_at",
+        ]
+
+    def get_roles(self, instance):
+        from apps.rt.services.admin_directory import membership_roles
+
+        return AdminRoleSummarySerializer(
+            membership_roles(instance.membershipid), many=True
+        ).data
+
+
+class AdminMembershipCreateSerializer(serializers.Serializer):
+    user_id = serializers.UUIDField()
+    is_default_tenant = serializers.BooleanField(required=False, default=False)
+
+
+class AdminMembershipUpdateSerializer(serializers.Serializer):
+    is_default_tenant = serializers.BooleanField()
+
+
+class AdminRoleSerializer(serializers.ModelSerializer):
+    role_id = serializers.UUIDField(source="roleid", read_only=True)
+    tenant_id = serializers.UUIDField(source="tenantid_id", read_only=True)
+    permissions = serializers.SerializerMethodField()
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+
+    class Meta:
+        model = Role
+        fields = [
+            "role_id",
+            "tenant_id",
+            "name",
+            "description",
+            "permissions",
+            "created_at",
+        ]
+
+    def get_permissions(self, instance):
+        from apps.rt.services.admin_directory import role_permissions
+
+        return AdminPermissionCatalogueSerializer(
+            role_permissions(instance.roleid), many=True
+        ).data
+
+
+class AdminRoleWriteSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=100, trim_whitespace=True)
+    description = serializers.CharField(
+        max_length=400, required=False, allow_blank=True, allow_null=True
+    )
+
+    def validate_name(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Name is required.")
+        return value.strip()
+
+
+class AdminRoleAssignmentSerializer(serializers.Serializer):
+    role_id = serializers.UUIDField()
+
+
+class AdminPermissionAssignmentSerializer(serializers.Serializer):
+    permission_code = serializers.CharField(max_length=100, trim_whitespace=True)
+
+
+class AdminUserCreateResponseSerializer(serializers.Serializer):
+    user = AdminDirectoryUserSerializer()
+    membership = AdminMembershipSerializer()
 
 
 class AdminFlowSerializer(serializers.ModelSerializer):

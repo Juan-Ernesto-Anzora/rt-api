@@ -362,8 +362,17 @@ USING (
     (N'attachments.write', N'Upload attachments'),
     (N'admin.read', N'Access tenant administration'),
     (N'admin.audit.read', N'Read tenant audit activity'),
+    (N'admin.permissions', N'Manage role permissions'),
+    (N'admin.roles', N'Manage roles and role assignments'),
+    (N'admin.settings', N'Manage admin settings'),
     (N'admin.users', N'Manage users'),
-    (N'admin.workflows', N'Manage workflows')
+    (N'admin.workflows', N'Manage workflows'),
+    (N'featureflags.manage', N'Manage feature flags'),
+    (N'notifications.manage', N'Manage notifications'),
+    (N'reports.export', N'Export reports'),
+    (N'reports.read', N'Read reports'),
+    (N'sla.manage', N'Manage SLA policies'),
+    (N'tenant.settings.manage', N'Manage tenant settings')
 ) AS source(Code, Description)
 ON target.Code = source.Code
 WHEN NOT MATCHED THEN
