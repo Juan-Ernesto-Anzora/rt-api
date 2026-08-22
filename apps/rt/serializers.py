@@ -1,3 +1,5 @@
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from .models import (
@@ -234,6 +236,7 @@ class RequestDetailSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
     def get_tags(self, obj):
         return []
 
@@ -381,6 +384,9 @@ class AdminAuditSerializer(serializers.ModelSerializer):
     request_id = serializers.UUIDField(source="requestid_id", read_only=True)
     actor_id = serializers.UUIDField(source="actorid_id", read_only=True)
     created_at = serializers.DateTimeField(source="createdat", read_only=True)
+    payload_json = serializers.SerializerMethodField()
+    entity_id = serializers.SerializerMethodField()
+    entity_type = serializers.SerializerMethodField()
 
     class Meta:
         model = Activity
@@ -390,8 +396,65 @@ class AdminAuditSerializer(serializers.ModelSerializer):
             "actor_id",
             "type",
             "payload",
+            "payload_json",
+            "entity_id",
+            "entity_type",
             "created_at",
         ]
+
+    @extend_schema_field(serializers.JSONField(allow_null=True))
+    def get_payload_json(self, obj):
+        import json
+
+        try:
+            value = json.loads(obj.payload) if obj.payload else None
+        except (TypeError, ValueError):
+            return None
+        return value if isinstance(value, (dict, list)) else None
+
+    @extend_schema_field(serializers.UUIDField(allow_null=True))
+    def get_entity_id(self, obj):
+        payload = self.get_payload_json(obj)
+        value = payload.get("entity_id") if isinstance(payload, dict) else None
+        return value or obj.requestid_id
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_entity_type(self, obj):
+        payload = self.get_payload_json(obj)
+        if isinstance(payload, dict) and payload.get("entity_type"):
+            return payload["entity_type"]
+        return "request" if obj.requestid_id else None
+
+
+class AdminAuditFilterSerializer(serializers.Serializer):
+    type = serializers.CharField(required=False, max_length=50)
+    actor_id = serializers.UUIDField(required=False)
+    request_id = serializers.UUIDField(required=False)
+    entity_id = serializers.UUIDField(required=False)
+    created_from = serializers.DateTimeField(required=False)
+    created_to = serializers.DateTimeField(required=False)
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    page_size = serializers.IntegerField(
+        required=False, min_value=1, max_value=100, default=25
+    )
+
+    def validate(self, attrs):
+        if (
+            attrs.get("created_from")
+            and attrs.get("created_to")
+            and attrs["created_to"] < attrs["created_from"]
+        ):
+            raise serializers.ValidationError(
+                {"created_to": ["Must be on or after created_from."]}
+            )
+        return attrs
+
+
+class PaginatedAdminAuditResponseSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+    next = serializers.URLField(allow_null=True)
+    previous = serializers.URLField(allow_null=True)
+    results = AdminAuditSerializer(many=True)
 
 
 class AdminDirectoryUserSerializer(serializers.ModelSerializer):
@@ -500,11 +563,15 @@ class AdminMembershipSerializer(serializers.ModelSerializer):
             "created_at",
         ]
 
+    @extend_schema_field(AdminRoleSummarySerializer(many=True))
     def get_roles(self, instance):
         from apps.rt.services.admin_directory import membership_roles
 
+        links = getattr(instance, "_admin_role_links", None)
+        roles = [link.roleid for link in links] if links is not None else None
         return AdminRoleSummarySerializer(
-            membership_roles(instance.membershipid), many=True
+            roles if roles is not None else membership_roles(instance.membershipid),
+            many=True,
         ).data
 
 
@@ -534,11 +601,21 @@ class AdminRoleSerializer(serializers.ModelSerializer):
             "created_at",
         ]
 
+    @extend_schema_field(AdminPermissionCatalogueSerializer(many=True))
     def get_permissions(self, instance):
         from apps.rt.services.admin_directory import role_permissions
 
+        links = getattr(instance, "_admin_permission_links", None)
+        permissions = (
+            [link.permissioncode for link in links] if links is not None else None
+        )
         return AdminPermissionCatalogueSerializer(
-            role_permissions(instance.roleid), many=True
+            (
+                permissions
+                if permissions is not None
+                else role_permissions(instance.roleid)
+            ),
+            many=True,
         ).data
 
 
@@ -674,9 +751,11 @@ class TenantSettingSerializer(serializers.ModelSerializer):
             "updated_by_id",
         ]
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_value(self, obj):
         return None if obj.issensitive else obj.value
 
+    @extend_schema_field(OpenApiTypes.BOOL)
     def get_has_value(self, obj):
         return obj.value not in (None, "")
 
@@ -922,6 +1001,7 @@ class AdminStatusSerializer(serializers.ModelSerializer):
 
 
 class AdminStatusWriteSerializer(serializers.Serializer):
+    VALID_CATEGORIES = {"open", "in_progress", "waiting", "closed"}
     name = serializers.CharField(max_length=50, trim_whitespace=True)
     category = serializers.CharField(max_length=20, trim_whitespace=True)
     is_terminal = serializers.BooleanField(required=False, default=False)
@@ -932,9 +1012,12 @@ class AdminStatusWriteSerializer(serializers.Serializer):
         return value.strip()
 
     def validate_category(self, value):
-        if not value.strip():
+        normalized = value.strip().lower()
+        if not normalized:
             raise serializers.ValidationError("Category is required.")
-        return value.strip().lower()
+        if normalized not in self.VALID_CATEGORIES:
+            raise serializers.ValidationError("Unsupported status category.")
+        return normalized
 
 
 class AdminTransitionSerializer(serializers.ModelSerializer):
@@ -1006,3 +1089,37 @@ class SearchQuerySerializer(serializers.Serializer):
     created_to = serializers.DateTimeField(required=False)
     updated_from = serializers.DateTimeField(required=False)
     updated_to = serializers.DateTimeField(required=False)
+
+
+class SearchResultSerializer(serializers.Serializer):
+    request_id = serializers.UUIDField()
+    human_id = serializers.CharField()
+    title = serializers.CharField()
+    priority = serializers.CharField()
+    status_id = serializers.UUIDField()
+    assignee_id = serializers.UUIDField(allow_null=True)
+    flow_id = serializers.UUIDField()
+    created_at = serializers.DateTimeField()
+    updated_at = serializers.DateTimeField()
+    rank = serializers.IntegerField()
+    match_sources = serializers.ListField(child=serializers.CharField())
+
+
+class SearchResponseSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+    page = serializers.IntegerField()
+    page_size = serializers.IntegerField()
+    results = SearchResultSerializer(many=True)
+
+
+class AttachmentFinalizeItemResponseSerializer(serializers.Serializer):
+    attachment_id = serializers.UUIDField()
+    filename = serializers.CharField()
+    storage_url = serializers.URLField()
+
+
+class AttachmentFinalizeResponseSerializer(serializers.Serializer):
+    request_id = serializers.UUIDField()
+    group_id = serializers.UUIDField()
+    comment_id = serializers.UUIDField()
+    attachments = AttachmentFinalizeItemResponseSerializer(many=True)

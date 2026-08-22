@@ -3,6 +3,8 @@ from django.db import connection
 from django.http import JsonResponse
 from django.utils.deprecation import MiddlewareMixin
 
+from rt_api.exceptions import error_envelope
+
 PUBLIC_PATH_PREFIXES = (
     "/api/health",
     "/api/schema",
@@ -31,7 +33,8 @@ class TenantMiddleware(MiddlewareMixin):
         tenant_code = request.headers.get(TENANT_HEADER)
         if not tenant_code:
             return JsonResponse(
-                {"detail": f"{TENANT_HEADER} header required."}, status=400
+                error_envelope("tenant_required", f"{TENANT_HEADER} header required."),
+                status=400,
             )
 
         # Resolver TenantId
@@ -41,7 +44,9 @@ class TenantMiddleware(MiddlewareMixin):
             )
             row = cur.fetchone()
         if not row:
-            return JsonResponse({"detail": "Tenant not found."}, status=404)
+            return JsonResponse(
+                error_envelope("tenant_not_found", "Tenant not found."), status=404
+            )
 
         tenant_id = row[0]
         request.tenant_id = tenant_id
@@ -56,7 +61,61 @@ class TenantMiddleware(MiddlewareMixin):
                 )
                 if cur.fetchone() is None:
                     return JsonResponse(
-                        {"detail": "Forbidden: user not in tenant."}, status=403
+                        error_envelope(
+                            "permission_denied", "User is not a member of this tenant."
+                        ),
+                        status=403,
                     )
 
         return None
+
+
+class ApiErrorEnvelopeMiddleware(MiddlewareMixin):
+    def process_response(self, request, response):
+        if (
+            not request.path.startswith("/api/")
+            or response.status_code < 400
+            or getattr(response, "streaming", False)
+        ):
+            return response
+        response_data = getattr(response, "data", None)
+        if isinstance(response_data, dict) and {
+            "code",
+            "message",
+            "details",
+        }.issubset(response_data):
+            return response
+        content_type = response.get("Content-Type", "")
+        if content_type.startswith("application/json"):
+            try:
+                import json
+
+                data = json.loads(response.content.decode(response.charset))
+                if isinstance(data, dict) and {
+                    "code",
+                    "message",
+                    "details",
+                }.issubset(data):
+                    return response
+            except (ValueError, UnicodeDecodeError):
+                pass
+        code = {
+            400: "validation_error",
+            401: "authentication_required",
+            403: "permission_denied",
+            404: "not_found",
+            409: "conflict",
+        }.get(response.status_code, "server_error")
+        try:
+            from http import HTTPStatus
+
+            message = HTTPStatus(response.status_code).phrase
+        except ValueError:
+            message = "Request failed."
+        replacement = JsonResponse(
+            error_envelope(code, message), status=response.status_code
+        )
+        for header, value in response.items():
+            if header.lower() not in {"content-type", "content-length"}:
+                replacement[header] = value
+        return replacement

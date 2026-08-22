@@ -6,6 +6,7 @@ dist/
 .venv/
 .env
 .env.*
+!.env.example
 *.log
 media/
 staticfiles/

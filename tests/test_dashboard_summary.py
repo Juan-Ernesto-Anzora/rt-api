@@ -147,7 +147,14 @@ def test_dashboard_summary_view_uses_tenant_scoped_request_queryset(monkeypatch)
 
     monkeypatch.setattr("apps.rt.views.Request.objects.filter", fake_request_filter)
     monkeypatch.setattr("apps.rt.views.build_dashboard_summary", fake_summary)
-    request = SimpleNamespace(tenant_id=tenant_id, user=SimpleNamespace(id=user_id))
+    monkeypatch.setattr(
+        "apps.rt.views.resolve_tenant_user",
+        lambda auth_user, tenant: (SimpleNamespace(userid=user_id), SimpleNamespace()),
+    )
+    request = SimpleNamespace(
+        tenant_id=tenant_id,
+        user=SimpleNamespace(id=42, email="agent@example.com"),
+    )
 
     response = DashboardSummaryView().get(request)
 

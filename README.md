@@ -5,10 +5,17 @@
 # Python 3.12 + Poetry
 poetry install
 cp .env.example .env
+## Replace every replace-with-... value using local softdev-infra credentials.
 poetry run python manage.py migrate   # (no models yet; this sets up Django tables only)
 poetry run python manage.py createsuperuser
 poetry run python manage.py runserver 0.0.0.0:8000
 ```
+
+For an existing RT database, apply the idempotent Sprint 3 scripts in the order
+listed in `docs/sprint-3-api-verification.md`. Do not use
+`db/create-rt-database.sql` as an upgrade script. Canonical roles, permissions,
+SLA demo policies, settings, flags, and templates are inserted only when
+missing; administrator changes are not overwritten.
 
 ## Endpoints
 - `GET /api/health`
@@ -25,6 +32,9 @@ poetry run python manage.py runserver 0.0.0.0:8000
 - DB: SQL Server via `mssql-django` + `pyodbc`. Update env for your instance.
 - MinIO: pre-signed PUT URLs using boto3 S3 client.
 - CORS: open in dev; tighten later.
+- Sprint 3 verification and database instructions:
+  `docs/sprint-3-api-verification.md`.
+- Known release follow-ups: `docs/sprint-3-known-issues.md`.
 
 ## Sprint 1 Smoke Test
 1. Start API

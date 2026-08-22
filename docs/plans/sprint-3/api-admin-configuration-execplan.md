@@ -1296,6 +1296,472 @@ create no audit event.
 10. Run all repository checks and the Postman sequence. Apply the companion SQL
     through `rt-infra` only after separate approval and keep this plan current.
 
+### Milestone 6: API Polish and Sprint 3 Release Preparation
+
+Day 9 is a bounded hardening and release-readiness pass. It does not add a new
+admin product area or broaden Sprint 2 request lifecycle behavior. An operator
+should be able to run one documented schema-upgrade sequence, start the API,
+exercise every Sprint 3 route with predictable pagination and error JSON, and
+generate a complete OpenAPI document without errors. Existing successful
+Sprint 2 response fields and route aliases remain compatible.
+
+Implementation must start on `chore/api-sprint3-polish` from updated `main`
+after the Day 8 PR is merged. Do not implement Day 9 on the Day 8 feature
+branch. Before editing, regenerate the current schema and retain the warning/
+error count as a regression baseline.
+
+#### Day 9 inspected baseline
+
+The cumulative Sprint 3 diff is `a1b9d01..638eaf7`, beginning after the Sprint
+2 notification baseline and including admin foundation, workflow admin,
+directory/RBAC, SLA/reports, and tenant configuration. It changes 29 files and
+adds approximately 9,800 lines, including tests and this living plan.
+
+Current API inspection establishes:
+
+- Admin error helpers already return `code`, `message`, and `details`, but DRF
+  authentication/validation errors, `TenantMiddleware`, MinIO presign, and the
+  attachment init/finalize endpoints still emit `{"detail": ...}` or DRF's
+  native error dictionaries.
+- There is no project-level DRF exception handler. Unexpected `IntegrityError`,
+  `FieldError`, `KeyError`, Django validation errors, and router-level malformed
+  UUID 404s can therefore escape the canonical JSON contract; with development
+  `DEBUG=1`, some failures can expose technical pages.
+- Expected directory and SLA uniqueness races catch `IntegrityError`, but
+  workflow flow/status/transition writes do not. An invalid status category can
+  reach the SQL check constraint, and duplicate workflow names can reach the
+  unique constraint, producing a 500 instead of a clean client error.
+- `AdminAuditView` scopes by tenant and supports `type`, `request_id`,
+  `actor_id`, `created_from`, and `created_to`, but passes raw strings directly
+  into ORM filters. It does not validate UUID/date ranges, has no `entity_id`,
+  and uses `PageNumberPagination` without enabling `page_size`.
+- Admin audit `payload` is currently the stored JSON string. Existing rows and
+  clients must continue to receive that exact field. A new parsed field may be
+  additive only and must tolerate null or malformed legacy payloads.
+- Directory user, membership, role, permission, audit, and SLA lists return the
+  standard DRF pagination envelope. Membership serialization calls
+  `membership_roles()` once per row and role serialization calls
+  `role_permissions()` once per row, producing N+1 queries.
+- Workflow, feature-flag, and notification-template catalogues intentionally
+  return bounded arrays. Lookup endpoints and request detail subcollections
+  also have established shapes. Day 9 must document these bounded exceptions
+  rather than changing them to paginated envelopes and breaking the web UI.
+- `admin.workflows` exists in code, checked-in seed SQL, and the live permission
+  catalogue, but workflow administration still checks only `admin.read`.
+  Consequently a manager with admin-area access can currently perform workflow
+  writes without the purpose-built permission.
+- Dashboard `assigned_to_me` still receives Django's integer auth-user ID while
+  requests use the RT domain user's UUID. The report service fixed this mapping,
+  but the Sprint 2 dashboard endpoint still reports zero for normal JWT users.
+- Workflow writes use a private direct `Activity.objects.create` helper rather
+  than `write_admin_audit`; update endpoints create audit rows even when no
+  effective field changes.
+- Tracked settings and `.env.example` contain literal development credentials.
+  They are not production secrets, and `.env` is untracked, but release
+  preparation should replace committed credential-looking defaults with
+  explicit placeholders and fail closed for non-debug deployments.
+
+Generated OpenAPI validation on 2026-08-22 completed with 24 errors across five
+unique causes and nine warnings:
+
+- Missing request/response serializers for health, legacy presign, attachment
+  init, attachment finalize, and search APIViews.
+- Unresolved `SerializerMethodField` schemas for request tags, membership
+  roles, role permissions, masked setting value, and setting `has_value`.
+- Duplicate operation IDs caused by slash/no-slash compatibility routes for
+  dashboard, comments, and attachments.
+- Admin audit filters, standard error responses, and actual paginated admin
+  list envelopes are not fully represented.
+
+#### Read-only SQL Server comparison
+
+The `rt_sqlserver` MCP tools were not exposed on 2026-08-22. Following the
+existing fallback convention, inspection used bounded SELECT-only `sqlcmd`
+queries inside `rt_sqlserver`. No INSERT, UPDATE, DELETE, EXEC, ALTER, DROP,
+TRUNCATE, schema operation, or data change was run.
+
+Live schema findings:
+
+- `Activity.RequestId` and `ActorId` are nullable, matching the current model.
+  Current Activity payloads inspected with `ISJSON` are valid JSON, but there
+  are no live `admin.*` or `report.requests.exported` rows yet.
+- Activity has only `PK_Activity` and `IX_Activity_Request`. The tenant-scoped,
+  newest-first audit query lacks a supporting `(TenantId, CreatedAt)` index.
+- Membership, MembershipRole, Role, RolePermission, Flow, Status, Transition,
+  Activity, TenantSetting, FeatureFlag, and NotificationTemplate columns,
+  foreign keys, nullability, and unique indexes match the unmanaged models and
+  current DDL. SQL Server reports NVARCHAR byte lengths, so values such as 200
+  bytes correspond to model `max_length=100` Unicode characters.
+- All exact 18 permission codes exist. ACME role mappings match the approved
+  counts: RT Admin 18, RT Manager 9, RT Agent 5, RT Requester 4, RT Viewer 2.
+  ACME has one active RT Admin membership assigned to `admin@example.com`.
+- ACME has the four Day 8 tenant settings, four enabled feature flags, and four
+  active notification templates. Sensitive values were not selected; inspected
+  setting values are the approved non-sensitive defaults.
+- The live Day 8 tables therefore have been applied even though the prior plan
+  still records that handoff as pending. Release verification must read the
+  database rather than infer upgrade state from plan checkboxes.
+- Live `SlaPolicy` remains the legacy shape: `PolicyId`, `TenantId`, `Name`,
+  `AppliesTo`, `Targets`, and `CreatedAt`, with no priority/minute/active/update
+  columns, no policy checks, and no tenant/name or active-priority index. It has
+  zero rows. The current Django model and SLA endpoints require the unapplied
+  Day 7 upgrade, making this a release blocker rather than an optional Postman
+  prerequisite.
+
+#### Day 9 implementation scope and files
+
+Expected implementation files:
+
+- `rt_api/exceptions.py`: proposed central DRF exception handler producing the
+  canonical error envelope and logging unexpected server errors without
+  returning stack traces or SQL text.
+- `apps/core/middleware.py`: canonical missing/unknown tenant errors and a
+  bounded API error-response normalization fallback for router-level 404s that
+  never rewrites successful or streaming responses.
+- `apps/common/serializers.py` and `apps/common/views.py`: explicit health and
+  presign contracts plus canonical validation errors.
+- `apps/rt/serializers.py`: reusable error, pagination/audit filter, parsed
+  audit payload, missing upload/search response, and explicit method-field
+  schemas; preserve every existing public success field.
+- `apps/rt/services/admin_audit.py`: centralize entity metadata and safe payload
+  parsing/filter support without removing existing payload keys.
+- `apps/rt/services/admin_permissions.py`: add the exact existing
+  `admin.workflows` constant and expose a reusable tenant-domain-user resolver
+  for dashboard identity without requiring admin permissions.
+- `apps/rt/services/admin_directory.py`: remove list N+1 behavior through
+  prefetched roles/permissions while retaining transactional lockout checks.
+- `apps/rt/views.py`: validated audit filters, shared pagination, exact workflow
+  permission checks, expected workflow conflict handling, no-op audit behavior,
+  OpenAPI annotations, and the narrow dashboard identity correction.
+- `rt_api/settings.py`: register the exception/pagination classes, align API
+  version metadata, and remove credential-looking production defaults without
+  renaming existing environment variables.
+- `rt_api/urls.py`: preserve legacy route aliases at runtime but expose only
+  canonical routes in generated OpenAPI.
+- `db/create-rt-database.sql`: add the tenant/date audit support index if it is
+  confirmed useful by the query plan.
+- `db/upgrade-sprint3-api-polish.sql`: proposed idempotent existing-database
+  audit index only; no table recreation or seed overwrite.
+- `.env.example`: non-secret placeholders and explicit local-development labels.
+- `README.md`: current setup, upgrade order, schema validation, API checks, and
+  Sprint 3 smoke commands.
+- `CHANGELOG.md`: proposed `0.2.0` Sprint 3 API release notes using Keep a
+  Changelog headings.
+- `docs/sprint-3-api-release-checklist.md`: deployment order, backup/rollback,
+  schema verification, Postman, OpenAPI, MailHog, and release sign-off.
+- `tests/test_api_errors.py`: cross-layer canonical error and exception tests.
+- `tests/test_admin_audit.py`: validated filters, entity compatibility,
+  pagination, payload parsing, and query-shape tests.
+- `tests/test_admin_workflows.py`: exact permission, duplicate/constraint,
+  invalid payload, no-op audit, and cross-tenant regressions.
+- `tests/test_admin_memberships.py`, `tests/test_admin_roles.py`, and
+  `tests/test_admin_users.py`: retain duplicate/final-admin coverage and add
+  query-efficiency assertions where serializers change.
+- `tests/test_openapi.py`: proposed single generated-schema validation test for
+  zero drf-spectacular errors, canonical paths, pagination, filters, errors, and
+  snake_case fields.
+- `tests/test_sprint2_compatibility.py`: preserve Sprint 2 route aliases,
+  success fields/status codes, grouped uploads, transitions, dashboard, search,
+  and notification failure isolation.
+- `tests/test_schema_release.py`: checked-in model/DDL/upgrade/permission/seed/
+  secret invariants without requiring live SQL Server in CI.
+- `docs/plans/sprint-3/api-admin-configuration-execplan.md`: keep this milestone
+  current through release verification.
+
+Do not add new product endpoints, managed Django migrations for legacy tables,
+admin UI behavior, notification event types, permission strings, workflow
+features, SLA timers, or report dimensions in Day 9.
+
+#### Canonical error contract
+
+Every API error response must contain exactly the stable top-level contract:
+
+```json
+{
+  "code": "validation_error",
+  "message": "Invalid request payload.",
+  "details": [
+    {"field": "status_id", "message": "Must be a valid UUID."}
+  ]
+}
+```
+
+Implementation rules:
+
+- Add a project exception handler based on DRF's default handler. Normalize
+  authentication, permission, not-found, throttling, parse, and serializer
+  exceptions while preserving their HTTP status and headers.
+- Flatten field errors through one shared helper. `details` is always a list;
+  it is empty only when no field-specific information exists.
+- `TenantMiddleware`, explicit upload/presign failures, and unmatched `/api/`
+  routes use the same helper/shape. Non-API Django/admin responses are untouched.
+- Expected duplicate/constraint conflicts return `409 conflict` or a field-level
+  `400 validation_error` according to existing endpoint semantics. Catch
+  expected workflow `IntegrityError` inside its transaction so SQL constraint
+  names/messages never reach the response.
+- Validate workflow status category, transition endpoints/duplicate pairs, and
+  all UUID/date query values before ORM execution. Missing dictionary values
+  are serializer errors, not `KeyError`.
+- A last-resort handler catches and logs unexpected `FieldError`,
+  `IntegrityError`, `KeyError`, Django validation errors, and UUID `ValueError`.
+  It returns a generic non-leaking envelope; tests must still prove all known
+  user mistakes are handled before this fallback.
+- Preserve all successful Sprint 2 response bodies and status codes. Error-body
+  normalization is the intended hardening change; release notes must call it
+  out so external clients can move from legacy `detail` to the canonical fields.
+
+#### Admin audit contract and filters
+
+Keep the existing paginated response and fields:
+
+```text
+activity_id
+request_id
+actor_id
+type
+payload
+created_at
+```
+
+Add only backward-compatible fields:
+
+```text
+entity_id
+entity_type
+payload_json
+```
+
+`payload` remains the raw nullable JSON string. `payload_json` returns the safely
+parsed JSON object/list when valid and `null` for null, malformed, scalar, or
+unsupported legacy content. It never raises a JSON exception. `entity_id`
+defaults to `request_id` for request-linked activity and otherwise comes from
+new explicit audit metadata. Existing event-specific IDs remain inside payload.
+
+Add `AdminAuditFilterSerializer` and document these query parameters:
+
+```text
+type
+actor_id
+request_id
+entity_id
+created_from
+created_to
+page
+page_size
+```
+
+Rules:
+
+- UUIDs use DRF UUID fields. Malformed values return `400 validation_error`.
+- Dates use aware DRF datetime fields; `created_to < created_from` returns 400.
+- `page >= 1`; `page_size` defaults to 25 and is capped at 100.
+- All filters begin with `tenantid_id=request.tenant_id` and newest-first stable
+  ordering by `-createdat`, then `-activityid`.
+- `request_id` matches the physical request relationship only. `entity_id`
+  matches request ID or an explicit payload `entity_id` using parameterized SQL
+  Server `JSON_VALUE`; no user input is interpolated into SQL.
+- Extend `write_admin_audit` with explicit `entity_type`/`entity_id` arguments
+  and migrate all Sprint 3 write call sites to it. Preserve event-specific
+  payload keys and never add sensitive setting/template content.
+- Add `(TenantId, CreatedAt DESC)` to fresh DDL and the idempotent polish upgrade
+  after checking no equivalent index exists. Do not duplicate `IX_Activity_Request`.
+
+#### Pagination and query efficiency
+
+Add one `StandardPageNumberPagination` with default 25,
+`page_size_query_param="page_size"`, and maximum 100. Use it for request,
+lookup, directory, audit, and SLA list views that already return a DRF
+pagination envelope. This enables the documented `page_size` input without
+changing their envelope.
+
+Keep these established bounded responses unpaginated and document them as
+arrays: workflow catalogue, feature flags, notification templates, workflow
+detail statuses/transitions, request detail subcollections, activity timeline,
+and report summary dimensions. Search retains its custom `page`/`page_size`
+contract and CSV retains its explicit export bound.
+
+For membership and role lists, prefetch role and permission links once and have
+serializers consume prefetched data. Add query-count regression assertions that
+list query counts remain constant as fixture row counts grow. Preserve detail
+serialization and lockout queries. Add an Activity tenant/date index and inspect
+the SQL Server execution plan during manual release verification; do not add
+speculative indexes for tiny bounded catalogues.
+
+#### Permissions, tenancy, audit, and compatibility
+
+- Add `ADMIN_WORKFLOWS_PERMISSION = "admin.workflows"` from the existing
+  catalogue. Workflow reads/writes require `admin.read` plus
+  `admin.workflows`; do not introduce `admin.access` or any new code.
+- Preserve exact Day 5-8 permission combinations and report permissions.
+  Sprint 2 request/comment/upload RBAC expansion is out of scope because adding
+  it now would break existing clients; tenant/auth behavior remains unchanged.
+- Re-check every list and identifier lookup. Tenant-owned IDs return 404 when
+  foreign; global permission rows and global domain users remain scoped through
+  the documented role/membership operation.
+- Centralize workflow audit writes through `write_admin_audit`. Effective
+  creates/updates write exactly one row in the transaction; rejected and no-op
+  updates write none.
+- Correct dashboard `assigned_to_me` by resolving the authenticated email to an
+  active-tenant RT domain user UUID through a permission-neutral helper. Keep
+  every dashboard field and route unchanged.
+- Preserve both slash and no-slash Sprint 2 runtime aliases used by existing
+  Postman/web clients. Mark compatibility aliases excluded from generated
+  OpenAPI so each canonical operation ID is unique.
+
+#### Schema, seed, secrets, and release order
+
+No Sprint 3 API release is ready while the live SLA table has the legacy shape.
+The release checklist must require a database backup and apply/verify scripts in
+this dependency order, safely rerunning already-applied scripts:
+
+```text
+db/upgrade-sprint3-admin-workflows.sql
+db/upgrade-sprint3-admin-users-roles.sql
+db/upgrade-sprint3-sla-reports.sql
+db/upgrade-sprint3-admin-settings.sql
+db/upgrade-sprint3-api-polish.sql
+```
+
+Every script remains idempotent. Seed reruns add only missing permission, role,
+mapping, SLA, setting, flag, and template rows; they never overwrite tenant
+customizations. Parse-check all scripts and run them twice in a disposable SQL
+Server database before release. In the real environment, infrastructure owns
+application after backup/approval; API tests use SELECT-only post-verification.
+
+Replace committed credential-looking defaults with documented placeholders.
+Keep environment variable names stable. `DEBUG=0` must fail fast or produce a
+deployment check error when Django secret, database password, MinIO credentials,
+allowed hosts, or trusted origins are missing/default. Development may use
+explicitly labeled local-only values from an untracked `.env`; never print them
+in test output, OpenAPI, logs, audit payloads, or docs. Add a tracked-files
+secret scan to release verification and confirm `.env` remains untracked.
+
+Align `pyproject.toml` and drf-spectacular version metadata at proposed release
+`0.2.0`. Add release notes for canonical errors, stricter workflow permission,
+dashboard count correction, required SQL upgrades, and unchanged successful
+Sprint 2 contracts.
+
+#### Day 9 implementation order
+
+1. Merge Day 8, create `chore/api-sprint3-polish` from updated `main`, and
+   record the cumulative baseline schema errors, tests, and live schema state.
+2. Define reusable error, audit-filter, audit-response, pagination, upload,
+   search, and OpenAPI serializers before changing runtime behavior.
+3. Add the central DRF/API error normalization path and convert explicit legacy
+   `detail` responses. Add focused tests before touching business services.
+4. Validate and implement audit filters, additive parsed/entity fields, stable
+   ordering, centralized writes, and the Activity support index.
+5. Enforce `admin.workflows`, handle expected workflow conflicts/invalid data,
+   stop no-op audits, and preserve cross-tenant 404 behavior.
+6. Introduce shared pagination and prefetch membership roles/role permissions;
+   add query-count tests and correct dashboard domain identity narrowly.
+7. Complete drf-spectacular request/response/error annotations, exclude only
+   compatibility aliases, and reduce generated schema validation to zero errors
+   and zero unexplained warnings.
+8. Reconcile models/fresh DDL/upgrade scripts, remove tracked credential-like
+   defaults, and add release/upgrade documentation.
+9. Run the negative matrix, full checks, disposable SQL double-apply test,
+   SELECT-only live verification, Postman, MailHog, and Sprint 2 compatibility
+   smoke sequence. Update this plan with exact outcomes.
+
+#### Day 9 tests and verification
+
+Focused automated commands from repository root:
+
+```bash
+poetry run python manage.py check
+poetry run pytest tests/test_api_errors.py tests/test_admin_audit.py -q
+poetry run pytest tests/test_admin_workflows.py tests/test_admin_permissions.py -q
+poetry run pytest tests/test_admin_users.py tests/test_admin_memberships.py tests/test_admin_roles.py -q
+poetry run pytest tests/test_admin_sla_policies.py tests/test_reports.py tests/test_report_export.py -q
+poetry run pytest tests/test_admin_configuration.py tests/test_notifications.py -q
+poetry run pytest tests/test_openapi.py tests/test_schema_release.py tests/test_sprint2_compatibility.py -q
+poetry run python manage.py spectacular --file .agent/tmp/rt-openapi.yaml --validate
+poetry run pytest -q
+poetry run ruff check .
+poetry run black . --check
+poetry run isort . --check --diff
+git diff --check
+```
+
+The generated schema file is temporary and must not be committed. Required
+negative coverage:
+
+- Missing JWT returns canonical 401; missing `X-Tenant` returns canonical 400;
+  unknown tenant returns canonical 404; invalid membership/non-admin returns
+  canonical 403.
+- Cross-tenant flow/status/transition/user membership/role/SLA/template IDs and
+  flag keys fail closed without leaking rows or identifying foreign entities.
+- Malformed path/query/body UUIDs and malformed audit dates return 400/404
+  envelopes, never HTML or 500.
+- Duplicate users, memberships, roles, role/permission assignments, workflows,
+  statuses, transitions, and SLA names return clean 400/409 without SQL text.
+- Final-admin membership/role/permission removal and self-lockout remain blocked
+  with `409 admin_lockout` and no audit row.
+- Report export without `reports.export` returns 403; over-limit and invalid
+  filter exports return 400 and create no export audit.
+- Invalid typed setting values, unknown/duplicate keys, unsafe/malformed
+  template placeholders, multiline subjects, and immutable-key attempts return
+  400 and never expose sensitive values.
+- A raised SMTP exception and configuration/render exceptions do not break
+  request creation, assignment, comment, transition, close, or fallback email.
+- Injected regression doubles for `FieldError`, `IntegrityError`, `KeyError`,
+  malformed UUIDs, and invalid JSON prove the API emits canonical non-leaking
+  responses and the test client never receives an uncaught exception.
+
+Required positive/compatibility coverage:
+
+- All existing Sprint 2 success routes, aliases, status codes, and public fields
+  remain unchanged; `assigned_to_me` is corrected without changing its type.
+- Every pageable list supports `page` and capped `page_size` with `count`,
+  `next`, `previous`, and `results`; bounded arrays remain arrays.
+- Audit filters can be combined, stay tenant-scoped, and preserve `payload`
+  while adding safe `payload_json`/entity fields.
+- Every successful Sprint 3 write has exactly one correctly typed audit row;
+  no-op/rejected writes have none and sensitive content is absent.
+- Permission tests assert only the exact 18-code catalogue and approved route
+  combinations, especially `admin.workflows`.
+- OpenAPI includes every runtime product endpoint once, all canonical filters,
+  pagination and CSV media types, clean snake_case request/response fields,
+  reusable error responses, security requirements, and no internal Django
+  field names.
+- Membership and role list query counts remain bounded; reports/export remain
+  free of per-row related-object queries.
+- Fresh DDL and every upgrade are model-consistent, insert-only for matching
+  seed rows, and double-apply cleanly in disposable SQL Server.
+
+Manual release variables:
+
+```text
+base_url=http://localhost:8000
+tenant_code=ACME
+TOKEN=<ACME RT Admin JWT>
+manager_token=<ACME RT Manager JWT>
+non_admin_token=<JWT without admin.read>
+report_read_token=<JWT with reports.read only>
+other_tenant_code=<second tenant>
+request_id=<ACME request UUID>
+foreign_request_id=<other-tenant request UUID>
+flow_id=<ACME workflow UUID>
+status_id=<ACME status UUID>
+membership_id=<non-final-admin ACME membership UUID>
+role_id=<non-final-admin ACME role UUID>
+sla_policy_id=<ACME SLA policy UUID after upgrade>
+notification_template_id=<ACME template UUID>
+entity_id=<known admin audit entity UUID>
+```
+
+Postman must cover the full negative matrix above plus combined audit filters:
+
+```http
+GET {{base_url}}/api/admin/audit/?type=admin.role.updated&actor_id={{actor_id}}&entity_id={{entity_id}}&created_from=2026-01-01T00:00:00Z&created_to=2026-12-31T23:59:59Z&page=1&page_size=10
+```
+
+Release documentation must record the generated OpenAPI validation result,
+test count, database backup identifier, each applied script/checksum, post-
+upgrade schema query results, Postman collection/environment version, MailHog
+event verification, known deferred items, commit, PR, and proposed `0.2.0` tag.
+
 ## Tests and Verification
 
 Automated verification for Day 1-2 is listed in Milestone 1 Step 8.
@@ -1874,6 +2340,37 @@ Day 8 acceptance:
   parse-only validation, Postman/MailHog verification, and `git diff --check`
   pass before merge.
 
+Day 9 acceptance:
+
+- All API failures use `code`, `message`, and list-valued `details`; no known
+  user input produces an uncaught FieldError, IntegrityError, KeyError, UUID/
+  Django validation error, SQL text, stack trace, or HTML technical response.
+- Admin audit keeps its existing paginated response and raw `payload`, adds safe
+  parsed/entity fields, validates all approved filters, honors capped
+  `page_size`, remains tenant-scoped, and has a supporting tenant/date index.
+- Workflow admin requires both `admin.read` and the existing
+  `admin.workflows`; all other endpoint permission combinations remain exact
+  and no permission catalogue string is added.
+- Page-capable lists share one 25/default, 100/maximum pagination contract;
+  established bounded array and custom search/export responses remain
+  backward-compatible.
+- All successful Sprint 2 API paths, aliases, status codes, and public fields
+  remain intact. Dashboard `assigned_to_me` uses the correct domain identity.
+- Membership/role list N+1 queries are removed and query-count tests remain
+  bounded as result sizes grow.
+- Generated OpenAPI validates with zero errors and no unexplained warnings,
+  documents canonical routes once, and includes filters, pagination, errors,
+  security, CSV, and clean snake_case fields.
+- Live and fresh schema match unmanaged models after the ordered upgrade; all
+  scripts parse and apply twice cleanly in disposable SQL Server, and additive
+  seeds never overwrite existing tenant values or custom mappings.
+- Tracked files contain no real secrets or credential-looking production
+  defaults; non-debug deployment configuration fails closed when required
+  environment values are absent.
+- Full tests/format/lint, secret scan, Sprint 2 smoke, Sprint 3 Postman,
+  MailHog, schema verification, and release documentation are complete before
+  the `0.2.0` release candidate is tagged.
+
 ## Progress
 
 - [x] Sprint 3 Day 1-2 planning branch checked out: `feat/api-admin-foundation`.
@@ -1978,6 +2475,32 @@ Day 8 acceptance:
   tests, Ruff, Black, isort, and `git diff --check`.
 - [ ] Day 8 Postman/MailHog sequence passed against an environment where
   `db/upgrade-sprint3-admin-settings.sql` has been applied.
+- [x] Day 9 governing guidance and every completed Sprint 3 milestone read in
+  full before planning.
+- [x] Cumulative Sprint 3 diff, current exception/error paths, pagination,
+  serializers, permissions, tenant filters, audits, query patterns, models,
+  DDL/upgrades, tests, settings, and generated OpenAPI inspected.
+- [x] Day 9 generated OpenAPI baseline captured: 24 errors across five unique
+  causes and nine warnings.
+- [x] Day 9 read-only SQL MCP availability checked; tools were not exposed, so
+  bounded SELECT-only `sqlcmd` metadata/data validation was used.
+- [x] Live columns, FKs, indexes, permission rows, role assignments, safe seed
+  values, Activity payload validity, and SLA schema drift compared with models
+  and checked-in scripts without modifying data.
+- [x] Day 9 self-contained polish/error/audit/performance/schema/OpenAPI/test/
+  release plan prepared for review.
+- [x] Day 9 implementation approved.
+- [x] Day 8 PR merged and `chore/api-sprint3-polish` created from updated main.
+- [x] Day 9 error, audit, pagination, permission, efficiency, and compatibility
+  hardening implemented.
+- [x] Day 9 OpenAPI validates with zero errors and no unexplained warnings.
+- [ ] Ordered SQL upgrades applied twice in disposable SQL Server and verified
+  in the approved development/release environment.
+- [x] All Sprint 3 upgrade scripts passed SQL Server `SET PARSEONLY ON` without
+  applying schema or data changes.
+- [x] Day 9 automated checks and Sprint 2 compatibility tests completed.
+- [ ] Day 9 Postman, MailHog, disposable SQL double-apply, and release sign-off
+  completed in the approved environment.
 
 ## Surprises & Discoveries
 
@@ -2102,6 +2625,48 @@ Day 8 acceptance:
 - 2026-08-21: SQL Server accepted the full Day 8 companion script under
   `SET PARSEONLY ON` with no output or error. The script was not applied, so
   the current development database still requires the companion SQL handoff.
+- 2026-08-22: Day 9 live inspection contradicts the stale Day 8 handoff
+  checkbox: TenantSetting, FeatureFlag, NotificationTemplate, approved ACME
+  defaults, and supporting constraints are present. Release checks must inspect
+  actual schema state rather than trusting plan history.
+- 2026-08-22: The Day 7 SLA upgrade is not applied. Live `SlaPolicy` has only
+  its six legacy columns and zero rows, while the current unmanaged model reads
+  five newer columns. Calling SLA admin before the upgrade can raise a SQL
+  programming error, so this is a release blocker.
+- 2026-08-22: Live permission and role data is internally consistent: all 18
+  codes exist and ACME canonical role counts are 18/9/5/4/2. The API nevertheless
+  under-enforces workflow administration by checking only `admin.read` instead
+  of the already-present `admin.workflows` permission.
+- 2026-08-22: Live Activity has nullable request/actor relationships and all
+  inspected payloads are valid JSON, but has no admin/report events and no
+  tenant/date index for the new admin audit access pattern.
+- 2026-08-22: OpenAPI validation succeeds as a command but reports 24 schema
+  errors, nine warnings, missing APIView contracts, unresolved method fields,
+  and duplicate operation IDs from compatibility aliases. Existing tests only
+  assert selected path strings and therefore do not catch contract completeness.
+- 2026-08-22: The existing audit filter tests use fake querysets and assert raw
+  string UUID/date lookups, masking the production risk that malformed values
+  can raise before a canonical response. A dedicated filter serializer is
+  required.
+- 2026-08-22: Membership and role list serializers issue one query per result
+  for roles/permissions. The data is correct but does not meet the release query
+  efficiency target.
+- 2026-08-22: `.env` is untracked, but tracked `.env.example` and settings
+  defaults contain credential-looking development values. They must not be
+  mistaken for acceptable production fallback secrets.
+- 2026-08-22: drf-spectacular cannot apply `extend_schema(exclude=True)` to a
+  combined ViewSet callback because it looks for HTTP method names on the
+  ViewSet class. Tiny schema-excluded legacy subclasses preserve runtime aliases
+  while documenting each canonical operation only once.
+- 2026-08-22: After explicit APIView contracts, method-field annotations, audit
+  pagination/schema responses, and legacy-alias exclusion, drf-spectacular
+  validation reports zero errors and zero warnings instead of 24/9.
+- 2026-08-22: The host Poetry launcher remains unusable. The approved Python
+  3.12 Docker runtime ran the lockfile-backed suite: Django check, 182 tests,
+  Ruff, Black, repository-wide isort, and generated OpenAPI validation all pass.
+- 2026-08-22: All five Sprint 3 upgrade scripts pass SQL Server parse-only
+  validation. No script was applied, so the live legacy SLA blocker remains
+  until the infrastructure release step.
 
 ## Decision Log
 
@@ -2223,6 +2788,40 @@ Day 8 acceptance:
 - 2026-08-21: PATCH tenant settings as one atomic list and audit only changed
   keys/value types. PATCH flags and templates by immutable path identity and
   audit changed field names, never values or template content.
+- 2026-08-22: Day 9 is contract hardening only. Add no product endpoint or
+  permission string; preserve all successful Sprint 2 payloads and runtime
+  aliases while allowing the documented canonical error-envelope change.
+- 2026-08-22: Use one central DRF exception handler plus a narrow API middleware
+  fallback because tenant errors and unmatched converter routes occur outside
+  DRF. Unexpected programming/database errors are logged and masked, while
+  expected user mistakes are validated nearer their endpoint.
+- 2026-08-22: Preserve audit `payload` as raw text and add nullable
+  `payload_json`, `entity_type`, and `entity_id` fields. Future Sprint 3 audit
+  writers add explicit entity metadata; request-linked legacy rows derive the
+  entity from RequestId.
+- 2026-08-22: Use SQL Server `JSON_VALUE` with fixed SQL and bound UUID values
+  for `entity_id` filtering. Never interpolate a payload path or user value.
+- 2026-08-22: Standardize pagination only where a pagination envelope already
+  exists. Keep bounded workflow/flag/template and Sprint 2 subcollection arrays
+  unchanged to protect current web clients.
+- 2026-08-22: Enforce the existing `admin.workflows` permission in addition to
+  baseline `admin.read`. This closes a real authorization gap without adding a
+  permission or changing RT Admin access.
+- 2026-08-22: Add a new idempotent Day 9 upgrade for the Activity tenant/date
+  index rather than rewriting the historical applied scripts. Release docs own
+  the ordered, rerunnable upgrade sequence.
+- 2026-08-22: Propose `0.2.0` as the first consolidated Sprint 3 API release and
+  align Poetry/OpenAPI metadata only after implementation review.
+- 2026-08-22: Preserve legacy slash/no-slash routes with schema-excluded
+  subclasses rather than deleting aliases or accepting duplicate operation IDs.
+- 2026-08-22: Load the existing untracked `.env` explicitly, retain environment
+  variable names, use credential placeholders in tracked examples, disable
+  allow-all CORS outside debug, and fail non-debug startup when core database or
+  MinIO credentials are absent.
+- 2026-08-22: Use additive `payload_json`, `entity_id`, and `entity_type` audit
+  fields while preserving raw `payload`. Infer entity metadata centrally from
+  existing event payload IDs so all Sprint 3 writers gain a consistent contract
+  without rewriting their public event-specific keys.
 
 ## Outcomes & Retrospective
 
@@ -2328,3 +2927,60 @@ Milestone 5 implementation is complete on `codex/feat-api-admin-settings`:
   SQL Server parse-only validation.
 - Manual Postman/MailHog verification remains after the companion infrastructure
   path applies `db/upgrade-sprint3-admin-settings.sql` to the target database.
+
+Milestone 6 planning was completed and approved before implementation:
+
+- Audited the cumulative Sprint 3 code/schema/test diff and captured concrete
+  error-envelope, audit-filter, permission, query, schema, seed, secret,
+  compatibility, and OpenAPI gaps without changing runtime code.
+- Used bounded SELECT-only SQL Server inspection to verify live tables, columns,
+  foreign keys, indexes, exact permissions, canonical role assignments, safe
+  Day 8 defaults, and Activity JSON validity. No database write occurred.
+- Identified the unapplied Day 7 SLA schema as a release blocker and the applied
+  Day 8 state as a correction to stale plan history.
+- Defined a backward-compatible audit extension, exact filter/pagination
+  contract, centralized non-leaking errors, workflow permission correction,
+  N+1 removal, dashboard identity fix, OpenAPI zero-error target, idempotent
+  Activity index upgrade, negative matrix, and Sprint 2 compatibility suite.
+- Defined exact repository files, commands, SQL upgrade order, Postman variables,
+  release documentation, secret handling, and `0.2.0` release-candidate sign-off.
+- No application, schema, seed, environment, or live data change was made during
+  Day 9 planning.
+
+Milestone 6 implementation is complete on `chore/api-sprint3-polish` with
+manual release-environment verification pending:
+
+- Added one canonical API exception contract for DRF, tenant middleware,
+  explicit upload/presign failures, and router-level API errors. Known
+  IntegrityError, FieldError, KeyError, Django validation, and UUID value paths
+  no longer expose SQL, stack traces, or HTML technical pages.
+- Added validated, combinable admin audit filters for type, actor, request,
+  entity, date range, page, and capped page size. Preserved raw `payload` and
+  added safe parsed/entity fields plus deterministic newest-first ordering.
+- Centralized Sprint 3 audit entity metadata, stopped workflow no-op audits,
+  enforced the exact existing `admin.workflows` permission, validated status
+  categories/duplicates, and masked workflow uniqueness conflicts.
+- Enabled documented `page_size` through one shared paginator without changing
+  bounded-array or custom search/export success shapes. Membership role and role
+  permission lists now consume prefetched links instead of per-row queries.
+- Corrected dashboard `assigned_to_me` through the active-tenant RT domain user
+  while preserving its route, fields, and status codes. Added explicit Sprint 2
+  slash/no-slash compatibility tests.
+- Completed health, presign, grouped upload, search, audit, method-field,
+  pagination, error, and alias OpenAPI contracts. Generated schema validation is
+  clean at version `0.2.0` with no errors or warnings.
+- Added `IX_Activity_TenantCreated` to fresh DDL and the idempotent
+  `db/upgrade-sprint3-api-polish.sql`. All Sprint 3 upgrades parse successfully
+  under SQL Server `SET PARSEONLY ON`; none was applied to live data.
+- Replaced tracked credential-looking defaults with explicit placeholders,
+  loaded untracked `.env`, restricted allow-all CORS to debug, and made missing
+  production database/MinIO secrets a startup configuration error.
+- Added `CHANGELOG.md`, `docs/sprint-3-api-verification.md`, and
+  `docs/sprint-3-known-issues.md`, including exact upgrade/seed order and release
+  evidence requirements.
+- Added API error, OpenAPI, schema/release, audit, workflow permission, dashboard
+  identity, and Sprint 2 compatibility regressions. Django check, all 182 tests,
+  Ruff, Black, isort, OpenAPI validation, and `git diff --check` pass.
+- Remaining release work is operational: back up the target database, apply the
+  ordered upgrades (including the required SLA upgrade), double-apply in a
+  disposable database, run Postman/MailHog, capture evidence, and tag `0.2.0`.

@@ -5,6 +5,7 @@ from apps.rt.models import Membership, Membershiprole, Rolepermission, User
 ADMIN_ACCESS_PERMISSION = "admin.read"
 ADMIN_AUDIT_READ_PERMISSION = "admin.audit.read"
 ADMIN_USERS_PERMISSION = "admin.users"
+ADMIN_WORKFLOWS_PERMISSION = "admin.workflows"
 ADMIN_ROLES_PERMISSION = "admin.roles"
 ADMIN_PERMISSIONS_PERMISSION = "admin.permissions"
 ADMIN_SETTINGS_PERMISSION = "admin.settings"
@@ -56,14 +57,7 @@ def get_admin_context(request, required_permission=ADMIN_ACCESS_PERMISSION):
             status_code=400,
         )
 
-    rt_user = resolve_request_user(getattr(request, "user", None))
-    try:
-        membership = Membership.objects.get(
-            userid_id=rt_user.userid,
-            tenantid_id=tenant_id,
-        )
-    except Membership.DoesNotExist as exc:
-        raise permission_denied() from exc
+    rt_user, membership = resolve_tenant_user(getattr(request, "user", None), tenant_id)
 
     roles, permissions = resolve_membership_permissions(membership)
     context = AdminContext(
@@ -79,6 +73,18 @@ def get_admin_context(request, required_permission=ADMIN_ACCESS_PERMISSION):
     if required_permission and required_permission not in permissions:
         raise permission_denied()
     return context
+
+
+def resolve_tenant_user(auth_user, tenant_id):
+    rt_user = resolve_request_user(auth_user)
+    try:
+        membership = Membership.objects.get(
+            userid_id=rt_user.userid,
+            tenantid_id=tenant_id,
+        )
+    except Membership.DoesNotExist as exc:
+        raise permission_denied() from exc
+    return rt_user, membership
 
 
 def resolve_request_user(auth_user):

@@ -335,6 +335,8 @@ CREATE TABLE dbo.Activity (
   CONSTRAINT FK_Activity_Actor   FOREIGN KEY (ActorId)   REFERENCES dbo.[User](UserId) ON DELETE NO ACTION
 );
 CREATE INDEX IX_Activity_Request ON dbo.Activity(RequestId);
+CREATE INDEX IX_Activity_TenantCreated
+  ON dbo.Activity(TenantId, CreatedAt DESC);
 
 -- SavedSearch cascades from Tenant; NO ACTION from Owner
 CREATE TABLE dbo.SavedSearch (
