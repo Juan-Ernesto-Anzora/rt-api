@@ -9,6 +9,7 @@ from .models import (
     Permission,
     Request,
     Role,
+    Slapolicy,
     Status,
     Transition,
     User,
@@ -556,6 +557,157 @@ class AdminPermissionAssignmentSerializer(serializers.Serializer):
 class AdminUserCreateResponseSerializer(serializers.Serializer):
     user = AdminDirectoryUserSerializer()
     membership = AdminMembershipSerializer()
+
+
+class AdminSlaPolicySerializer(serializers.ModelSerializer):
+    sla_policy_id = serializers.UUIDField(source="policyid", read_only=True)
+    response_minutes = serializers.IntegerField(
+        source="responseminutes", read_only=True
+    )
+    resolution_minutes = serializers.IntegerField(
+        source="resolutionminutes", read_only=True
+    )
+    is_active = serializers.BooleanField(source="isactive", read_only=True)
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+    updated_at = serializers.DateTimeField(
+        source="updatedat", read_only=True, allow_null=True
+    )
+
+    class Meta:
+        model = Slapolicy
+        fields = [
+            "sla_policy_id",
+            "name",
+            "priority",
+            "response_minutes",
+            "resolution_minutes",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class AdminSlaPolicyWriteSerializer(serializers.Serializer):
+    VALID_PRIORITIES = {"low", "normal", "high", "urgent"}
+
+    name = serializers.CharField(max_length=100, trim_whitespace=True)
+    priority = serializers.CharField(max_length=20, trim_whitespace=True)
+    response_minutes = serializers.IntegerField(min_value=1)
+    resolution_minutes = serializers.IntegerField(min_value=1)
+    is_active = serializers.BooleanField(required=False, default=True)
+
+    def validate_name(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Name is required.")
+        return value.strip()
+
+    def validate_priority(self, value):
+        normalized = value.strip().lower()
+        if normalized not in self.VALID_PRIORITIES:
+            allowed = ", ".join(sorted(self.VALID_PRIORITIES))
+            raise serializers.ValidationError(f"Priority must be one of: {allowed}.")
+        return normalized
+
+    def validate(self, attrs):
+        instance = self.instance
+        response_minutes = attrs.get(
+            "response_minutes", getattr(instance, "responseminutes", None)
+        )
+        resolution_minutes = attrs.get(
+            "resolution_minutes", getattr(instance, "resolutionminutes", None)
+        )
+        if (
+            response_minutes is not None
+            and resolution_minutes is not None
+            and response_minutes > resolution_minutes
+        ):
+            raise serializers.ValidationError(
+                {
+                    "response_minutes": [
+                        "Response minutes cannot exceed resolution minutes."
+                    ]
+                }
+            )
+        return attrs
+
+
+class ReportFilterSerializer(serializers.Serializer):
+    VALID_PRIORITIES = AdminSlaPolicyWriteSerializer.VALID_PRIORITIES
+    VALID_STATUS_CATEGORIES = {"open", "in_progress", "waiting", "closed"}
+
+    q = serializers.CharField(
+        required=False, allow_blank=True, max_length=200, trim_whitespace=True
+    )
+    status_id = serializers.UUIDField(required=False)
+    status_category = serializers.CharField(
+        required=False, max_length=20, trim_whitespace=True
+    )
+    priority = serializers.CharField(
+        required=False, max_length=20, trim_whitespace=True
+    )
+    flow_id = serializers.UUIDField(required=False)
+    requester_id = serializers.UUIDField(required=False)
+    assignee_id = serializers.UUIDField(required=False)
+    created_from = serializers.DateTimeField(required=False)
+    created_to = serializers.DateTimeField(required=False)
+    updated_from = serializers.DateTimeField(required=False)
+    updated_to = serializers.DateTimeField(required=False)
+    due_from = serializers.DateTimeField(required=False)
+    due_to = serializers.DateTimeField(required=False)
+
+    def validate_priority(self, value):
+        normalized = value.strip().lower()
+        if normalized not in self.VALID_PRIORITIES:
+            raise serializers.ValidationError("Unsupported priority.")
+        return normalized
+
+    def validate_status_category(self, value):
+        normalized = value.strip().lower()
+        if normalized not in self.VALID_STATUS_CATEGORIES:
+            raise serializers.ValidationError("Unsupported status category.")
+        return normalized
+
+    def validate(self, attrs):
+        for prefix in ("created", "updated", "due"):
+            lower = attrs.get(f"{prefix}_from")
+            upper = attrs.get(f"{prefix}_to")
+            if lower and upper and upper < lower:
+                raise serializers.ValidationError(
+                    {f"{prefix}_to": ["Must be on or after the lower bound."]}
+                )
+        return attrs
+
+
+class ReportExportFilterSerializer(ReportFilterSerializer):
+    format = serializers.ChoiceField(choices=["csv"])
+
+
+class ReportDimensionSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+
+
+class ReportPriorityDimensionSerializer(ReportDimensionSerializer):
+    priority = serializers.CharField()
+
+
+class ReportStatusDimensionSerializer(ReportDimensionSerializer):
+    status_id = serializers.UUIDField()
+    name = serializers.CharField()
+    category = serializers.CharField()
+
+
+class ReportSummarySerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    open = serializers.IntegerField()
+    in_progress = serializers.IntegerField()
+    waiting = serializers.IntegerField()
+    closed = serializers.IntegerField()
+    due_today = serializers.IntegerField()
+    overdue = serializers.IntegerField()
+    unassigned = serializers.IntegerField()
+    assigned_to_me = serializers.IntegerField()
+    by_priority = ReportPriorityDimensionSerializer(many=True)
+    by_status = ReportStatusDimensionSerializer(many=True)
 
 
 class AdminFlowSerializer(serializers.ModelSerializer):

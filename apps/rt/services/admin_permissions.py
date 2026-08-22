@@ -7,6 +7,9 @@ ADMIN_AUDIT_READ_PERMISSION = "admin.audit.read"
 ADMIN_USERS_PERMISSION = "admin.users"
 ADMIN_ROLES_PERMISSION = "admin.roles"
 ADMIN_PERMISSIONS_PERMISSION = "admin.permissions"
+SLA_MANAGE_PERMISSION = "sla.manage"
+REPORTS_READ_PERMISSION = "reports.read"
+REPORTS_EXPORT_PERMISSION = "reports.export"
 
 
 class AdminPermissionError(Exception):

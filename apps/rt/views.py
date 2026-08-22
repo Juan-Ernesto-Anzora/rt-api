@@ -6,9 +6,16 @@ import boto3
 from botocore.client import Config
 from django.conf import settings
 from django.db import connection, transaction
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Value, When
+from django.http import StreamingHttpResponse
 from django.utils import timezone
-from drf_spectacular.utils import OpenApiExample, OpenApiParameter, extend_schema
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import (
+    OpenApiExample,
+    OpenApiParameter,
+    OpenApiResponse,
+    extend_schema,
+)
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
@@ -26,6 +33,7 @@ from .models import (
     Permission,
     Request,
     Role,
+    Slapolicy,
     Status,
     Transition,
     User,
@@ -46,6 +54,8 @@ from .serializers import (
     AdminRoleAssignmentSerializer,
     AdminRoleSerializer,
     AdminRoleWriteSerializer,
+    AdminSlaPolicySerializer,
+    AdminSlaPolicyWriteSerializer,
     AdminStatusSerializer,
     AdminStatusWriteSerializer,
     AdminTransitionSerializer,
@@ -60,6 +70,9 @@ from .serializers import (
     CommentSerializer,
     DashboardSummarySerializer,
     FlowLookupSerializer,
+    ReportExportFilterSerializer,
+    ReportFilterSerializer,
+    ReportSummarySerializer,
     RequestCloseReopenSerializer,
     RequestDetailSerializer,
     RequestSerializer,
@@ -69,6 +82,7 @@ from .serializers import (
     TransitionLookupSerializer,
     UserLookupSerializer,
 )
+from .services.admin_audit import write_admin_audit
 from .services.admin_directory import (
     AdminDirectoryError,
     assign_permission,
@@ -92,6 +106,9 @@ from .services.admin_permissions import (
     ADMIN_PERMISSIONS_PERMISSION,
     ADMIN_ROLES_PERMISSION,
     ADMIN_USERS_PERMISSION,
+    REPORTS_EXPORT_PERMISSION,
+    REPORTS_READ_PERMISSION,
+    SLA_MANAGE_PERMISSION,
     AdminPermissionError,
     get_admin_context,
     require_admin_permissions,
@@ -101,6 +118,17 @@ from .services.notification_service import (
     notify_request_assigned,
     notify_request_closed,
     notify_request_created,
+)
+from .services.report_service import (
+    build_report_queryset,
+    build_report_summary,
+    iter_request_csv,
+    normalized_audit_filters,
+)
+from .services.sla_service import (
+    create_sla_policy,
+    tenant_sla_policy,
+    update_sla_policy,
 )
 
 
@@ -1069,6 +1097,328 @@ class AdminRolePermissionDetailView(AdminDirectoryBaseView):
         except AdminDirectoryError as exc:
             return self.directory_error_response(exc)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminSlaPolicyBaseView(AdminDirectoryBaseView):
+    required_permission = SLA_MANAGE_PERMISSION
+
+
+class AdminSlaPolicyListCreateView(AdminSlaPolicyBaseView):
+    @extend_schema(
+        responses=AdminSlaPolicySerializer(many=True),
+        parameters=[
+            OpenApiParameter("priority", str),
+            OpenApiParameter("is_active", bool),
+            OpenApiParameter("search", str),
+            OpenApiParameter(
+                "sort",
+                str,
+                description=(
+                    "name, priority, response_minutes, resolution_minutes, "
+                    "created_at, or updated_at; prefix with - for descending."
+                ),
+            ),
+        ],
+        description=(
+            "List tenant-scoped SLA policies. Requires admin.read and sla.manage."
+        ),
+    )
+    def get(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+
+        queryset = Slapolicy.objects.filter(tenantid_id=request.tenant_id)
+        priority = (request.query_params.get("priority") or "").strip().lower()
+        if priority:
+            if priority not in AdminSlaPolicyWriteSerializer.VALID_PRIORITIES:
+                return validation_error_response(
+                    {"priority": ["Unsupported priority."]}
+                )
+            queryset = queryset.filter(priority=priority)
+        is_active = request.query_params.get("is_active")
+        if is_active in {"true", "false"}:
+            queryset = queryset.filter(isactive=is_active == "true")
+        elif is_active:
+            return validation_error_response({"is_active": ["Must be true or false."]})
+        search = (request.query_params.get("search") or "").strip()
+        if search:
+            queryset = queryset.filter(name__icontains=search)
+
+        if request.query_params.get("sort"):
+            queryset = self.safe_order(
+                request,
+                queryset,
+                {
+                    "name": "name",
+                    "priority": "priority",
+                    "response_minutes": "responseminutes",
+                    "resolution_minutes": "resolutionminutes",
+                    "created_at": "createdat",
+                    "updated_at": "updatedat",
+                },
+                "name",
+            )
+        else:
+            priority_order = Case(
+                When(priority="urgent", then=Value(0)),
+                When(priority="high", then=Value(1)),
+                When(priority="normal", then=Value(2)),
+                When(priority="low", then=Value(3)),
+                default=Value(4),
+                output_field=IntegerField(),
+            )
+            queryset = queryset.order_by(priority_order, "name")
+        return self.paginate(request, queryset, AdminSlaPolicySerializer)
+
+    @extend_schema(
+        request=AdminSlaPolicyWriteSerializer,
+        responses={201: AdminSlaPolicySerializer},
+        examples=[
+            OpenApiExample(
+                "Create normal SLA policy",
+                value={
+                    "name": "Normal",
+                    "priority": "normal",
+                    "response_minutes": 120,
+                    "resolution_minutes": 1440,
+                    "is_active": True,
+                },
+                request_only=True,
+            )
+        ],
+        description=(
+            "Create a tenant-scoped SLA policy. Requires admin.read and sla.manage."
+        ),
+    )
+    def post(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = AdminSlaPolicyWriteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            policy = create_sla_policy(
+                request.tenant_id,
+                admin_context.user.user_id,
+                serializer.validated_data,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(
+            AdminSlaPolicySerializer(policy).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminSlaPolicyDetailView(AdminSlaPolicyBaseView):
+    @extend_schema(
+        responses=AdminSlaPolicySerializer,
+        description=(
+            "Return a tenant-scoped SLA policy. Requires admin.read and sla.manage."
+        ),
+    )
+    def get(self, request, sla_policy_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            policy = tenant_sla_policy(request.tenant_id, sla_policy_id)
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminSlaPolicySerializer(policy).data)
+
+    @extend_schema(
+        request=AdminSlaPolicyWriteSerializer,
+        responses=AdminSlaPolicySerializer,
+        examples=[
+            OpenApiExample(
+                "Deactivate SLA policy",
+                value={"is_active": False},
+                request_only=True,
+            )
+        ],
+        description=(
+            "Update or deactivate a tenant-scoped SLA policy. Hard delete is not "
+            "available. Requires admin.read and sla.manage."
+        ),
+    )
+    def patch(self, request, sla_policy_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            policy = tenant_sla_policy(request.tenant_id, sla_policy_id)
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        serializer = AdminSlaPolicyWriteSerializer(
+            instance=policy, data=request.data, partial=True
+        )
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            policy, _changed = update_sla_policy(
+                request.tenant_id,
+                admin_context.user.user_id,
+                sla_policy_id,
+                serializer.validated_data,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(AdminSlaPolicySerializer(policy).data)
+
+
+class ReportBaseView(APIView):
+    permission_classes = [IsAuthenticated]
+    required_permission = None
+
+    def get_report_context_or_response(self, request):
+        try:
+            return get_admin_context(
+                request, required_permission=self.required_permission
+            )
+        except AdminPermissionError as exc:
+            return admin_error_response(exc)
+
+    def report_queryset_or_response(self, request, serializer_class):
+        serializer = serializer_class(data=request.query_params)
+        if not serializer.is_valid():
+            return validation_error_response(serializer.errors)
+        try:
+            queryset = build_report_queryset(
+                request.tenant_id, serializer.validated_data
+            )
+        except AdminDirectoryError as exc:
+            return admin_error_response(exc)
+        return serializer, queryset
+
+
+class ReportSummaryView(ReportBaseView):
+    required_permission = REPORTS_READ_PERMISSION
+
+    @extend_schema(
+        parameters=[ReportFilterSerializer],
+        responses=ReportSummarySerializer,
+        examples=[
+            OpenApiExample(
+                "Request report summary",
+                value={
+                    "total": 42,
+                    "open": 12,
+                    "in_progress": 8,
+                    "waiting": 4,
+                    "closed": 18,
+                    "due_today": 3,
+                    "overdue": 2,
+                    "unassigned": 5,
+                    "assigned_to_me": 7,
+                    "by_priority": [
+                        {"priority": "normal", "count": 24},
+                        {"priority": "urgent", "count": 3},
+                    ],
+                    "by_status": [
+                        {
+                            "status_id": "8fd8a263-37ef-48d7-a522-9f50f0f9a5e5",
+                            "name": "Open",
+                            "category": "open",
+                            "count": 12,
+                        }
+                    ],
+                },
+                response_only=True,
+            )
+        ],
+        description=(
+            "Return tenant-scoped request aggregates. Requires reports.read. "
+            "SLA compliance is omitted because no durable SLA timer, policy link, "
+            "first-response timestamp, or resolution timestamp exists."
+        ),
+    )
+    def get(self, request):
+        report_context = self.get_report_context_or_response(request)
+        if isinstance(report_context, Response):
+            return report_context
+        result = self.report_queryset_or_response(request, ReportFilterSerializer)
+        if isinstance(result, Response):
+            return result
+        _serializer, queryset = result
+        summary = build_report_summary(queryset, report_context.user.user_id)
+        return Response(ReportSummarySerializer(summary).data)
+
+
+class ReportRequestExportView(ReportBaseView):
+    required_permission = REPORTS_EXPORT_PERMISSION
+
+    @extend_schema(
+        parameters=[ReportExportFilterSerializer],
+        responses={
+            (200, "text/csv"): OpenApiResponse(
+                response=OpenApiTypes.BINARY,
+                description=(
+                    "Downloadable UTF-8 CSV. Columns: request_id, human_id, title, "
+                    "flow, status, priority, requester, assignee, due_at, "
+                    "created_at, updated_at."
+                ),
+            )
+        },
+        examples=[
+            OpenApiExample(
+                "Request CSV",
+                value=(
+                    "request_id,human_id,title,flow,status,priority,requester,"
+                    "assignee,due_at,created_at,updated_at\r\n"
+                ),
+                media_type="text/csv",
+                response_only=True,
+            )
+        ],
+        description=(
+            "Export filtered tenant requests as CSV. Requires reports.export. "
+            "Exports above REPORT_EXPORT_MAX_ROWS return export_limit_exceeded."
+        ),
+    )
+    def get(self, request):
+        report_context = self.get_report_context_or_response(request)
+        if isinstance(report_context, Response):
+            return report_context
+        result = self.report_queryset_or_response(request, ReportExportFilterSerializer)
+        if isinstance(result, Response):
+            return result
+        serializer, queryset = result
+        queryset = queryset.order_by("-updatedat", "requestid")
+        row_count = queryset.count()
+        if row_count > settings.REPORT_EXPORT_MAX_ROWS:
+            return Response(
+                {
+                    "code": "export_limit_exceeded",
+                    "message": "Narrow the report filters before exporting.",
+                    "details": [
+                        {
+                            "field": "limit",
+                            "message": str(settings.REPORT_EXPORT_MAX_ROWS),
+                        }
+                    ],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        write_admin_audit(
+            request.tenant_id,
+            report_context.user.user_id,
+            "report.requests.exported",
+            {
+                "format": "csv",
+                "row_count": row_count,
+                "filters": normalized_audit_filters(serializer.validated_data),
+            },
+        )
+        filename = timezone.now().strftime("rt-requests-%Y%m%d-%H%M%SZ.csv")
+        response = StreamingHttpResponse(
+            iter_request_csv(queryset), content_type="text/csv; charset=utf-8"
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
 
 
 class AdminWorkflowBaseView(APIView):

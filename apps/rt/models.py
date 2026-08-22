@@ -213,13 +213,23 @@ class Slapolicy(models.Model):
         blank=True,
         null=True,
     )  # Field name made lowercase.
+    priority = models.CharField(
+        db_column="Priority",
+        max_length=20,
+        db_collation="Latin1_General_100_CI_AS_SC_UTF8",
+    )
+    responseminutes = models.IntegerField(db_column="ResponseMinutes")
+    resolutionminutes = models.IntegerField(db_column="ResolutionMinutes")
+    isactive = models.BooleanField(db_column="IsActive")
     createdat = models.DateTimeField(
         db_column="CreatedAt"
     )  # Field name made lowercase.
+    updatedat = models.DateTimeField(db_column="UpdatedAt", blank=True, null=True)
 
     class Meta:
         managed = False
         db_table = "SlaPolicy"
+        unique_together = (("tenantid", "name"),)
 
 
 # CHILD TABLES
