@@ -232,6 +232,114 @@ class Slapolicy(models.Model):
         unique_together = (("tenantid", "name"),)
 
 
+class Tenantsetting(models.Model):
+    tenantsettingid = CustomUUIDField(
+        db_column="TenantSettingId", primary_key=True, editable=False
+    )
+    tenantid = models.ForeignKey("Tenant", models.DO_NOTHING, db_column="TenantId")
+    key = models.CharField(
+        db_column="Key",
+        max_length=100,
+        db_collation="Latin1_General_100_CI_AS_SC_UTF8",
+    )
+    value = models.TextField(
+        db_column="Value",
+        db_collation="Latin1_General_100_CI_AS_SC_UTF8",
+        blank=True,
+        null=True,
+    )
+    valuetype = models.CharField(
+        db_column="ValueType",
+        max_length=30,
+        db_collation="Latin1_General_100_CI_AS_SC_UTF8",
+    )
+    issensitive = models.BooleanField(db_column="IsSensitive")
+    updatedat = models.DateTimeField(db_column="UpdatedAt")
+    updatedbyid = models.ForeignKey(
+        "User",
+        models.DO_NOTHING,
+        db_column="UpdatedById",
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        managed = False
+        db_table = "TenantSetting"
+        unique_together = (("tenantid", "key"),)
+
+
+class Featureflag(models.Model):
+    featureflagid = CustomUUIDField(
+        db_column="FeatureFlagId", primary_key=True, editable=False
+    )
+    tenantid = models.ForeignKey("Tenant", models.DO_NOTHING, db_column="TenantId")
+    key = models.CharField(
+        db_column="Key",
+        max_length=100,
+        db_collation="Latin1_General_100_CI_AS_SC_UTF8",
+    )
+    enabled = models.BooleanField(db_column="Enabled")
+    description = models.CharField(
+        db_column="Description",
+        max_length=500,
+        db_collation="Latin1_General_100_CI_AS_SC_UTF8",
+        blank=True,
+        null=True,
+    )
+    updatedat = models.DateTimeField(db_column="UpdatedAt")
+    updatedbyid = models.ForeignKey(
+        "User",
+        models.DO_NOTHING,
+        db_column="UpdatedById",
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        managed = False
+        db_table = "FeatureFlag"
+        unique_together = (("tenantid", "key"),)
+
+
+class Notificationtemplate(models.Model):
+    notificationtemplateid = CustomUUIDField(
+        db_column="NotificationTemplateId", primary_key=True, editable=False
+    )
+    tenantid = models.ForeignKey("Tenant", models.DO_NOTHING, db_column="TenantId")
+    eventtype = models.CharField(
+        db_column="EventType",
+        max_length=100,
+        db_collation="Latin1_General_100_CI_AS_SC_UTF8",
+    )
+    subjecttemplate = models.CharField(
+        db_column="SubjectTemplate",
+        max_length=500,
+        db_collation="Latin1_General_100_CI_AS_SC_UTF8",
+    )
+    bodytemplate = models.TextField(
+        db_column="BodyTemplate",
+        db_collation="Latin1_General_100_CI_AS_SC_UTF8",
+    )
+    isactive = models.BooleanField(db_column="IsActive")
+    updatedat = models.DateTimeField(db_column="UpdatedAt")
+    updatedbyid = models.ForeignKey(
+        "User",
+        models.DO_NOTHING,
+        db_column="UpdatedById",
+        related_name="+",
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        managed = False
+        db_table = "NotificationTemplate"
+        unique_together = (("tenantid", "eventtype"),)
+
+
 # CHILD TABLES
 class Status(models.Model):
     statusid = CustomUUIDField(db_column="StatusId", primary_key=True, editable=False)

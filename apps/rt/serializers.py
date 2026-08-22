@@ -4,15 +4,23 @@ from .models import (
     Activity,
     Attachment,
     Comment,
+    Featureflag,
     Flow,
     Membership,
+    Notificationtemplate,
     Permission,
     Request,
     Role,
     Slapolicy,
     Status,
+    Tenantsetting,
     Transition,
     User,
+)
+from .services.admin_configuration import (
+    SUPPORTED_VALUE_TYPES,
+    normalize_setting_value,
+    validate_template_text,
 )
 
 
@@ -628,6 +636,170 @@ class AdminSlaPolicyWriteSerializer(serializers.Serializer):
                     ]
                 }
             )
+        return attrs
+
+
+class StrictFieldsMixin:
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            unknown = sorted(set(data) - set(self.fields))
+            if unknown:
+                raise serializers.ValidationError(
+                    {field: ["Unknown field."] for field in unknown}
+                )
+        return super().to_internal_value(data)
+
+
+class TenantSettingSerializer(serializers.ModelSerializer):
+    setting_id = serializers.UUIDField(source="tenantsettingid", read_only=True)
+    value = serializers.SerializerMethodField()
+    value_type = serializers.CharField(source="valuetype", read_only=True)
+    is_sensitive = serializers.BooleanField(source="issensitive", read_only=True)
+    has_value = serializers.SerializerMethodField()
+    updated_at = serializers.DateTimeField(source="updatedat", read_only=True)
+    updated_by_id = serializers.UUIDField(
+        source="updatedbyid_id", read_only=True, allow_null=True
+    )
+
+    class Meta:
+        model = Tenantsetting
+        fields = [
+            "setting_id",
+            "key",
+            "value",
+            "value_type",
+            "is_sensitive",
+            "has_value",
+            "updated_at",
+            "updated_by_id",
+        ]
+
+    def get_value(self, obj):
+        return None if obj.issensitive else obj.value
+
+    def get_has_value(self, obj):
+        return obj.value not in (None, "")
+
+
+class TenantSettingsResponseSerializer(serializers.Serializer):
+    settings = TenantSettingSerializer(many=True)
+
+
+class TenantSettingUpdateItemSerializer(StrictFieldsMixin, serializers.Serializer):
+    key = serializers.CharField(max_length=100, trim_whitespace=True)
+    value = serializers.JSONField(allow_null=True)
+    value_type = serializers.ChoiceField(choices=sorted(SUPPORTED_VALUE_TYPES))
+
+    def validate(self, attrs):
+        try:
+            attrs["value"] = normalize_setting_value(
+                attrs["key"], attrs["value_type"], attrs["value"]
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError({"value": [str(exc)]}) from exc
+        return attrs
+
+
+class TenantSettingsUpdateSerializer(StrictFieldsMixin, serializers.Serializer):
+    settings = TenantSettingUpdateItemSerializer(many=True, allow_empty=False)
+
+    def validate_settings(self, value):
+        keys = [item["key"] for item in value]
+        duplicates = sorted({key for key in keys if keys.count(key) > 1})
+        if duplicates:
+            raise serializers.ValidationError(
+                [f"Duplicate setting key: {key}." for key in duplicates]
+            )
+        return value
+
+
+class FeatureFlagSerializer(serializers.ModelSerializer):
+    feature_flag_id = serializers.UUIDField(source="featureflagid", read_only=True)
+    updated_at = serializers.DateTimeField(source="updatedat", read_only=True)
+    updated_by_id = serializers.UUIDField(
+        source="updatedbyid_id", read_only=True, allow_null=True
+    )
+
+    class Meta:
+        model = Featureflag
+        fields = [
+            "feature_flag_id",
+            "key",
+            "enabled",
+            "description",
+            "updated_at",
+            "updated_by_id",
+        ]
+
+
+class FeatureFlagUpdateSerializer(StrictFieldsMixin, serializers.Serializer):
+    enabled = serializers.BooleanField(required=False)
+    description = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, max_length=500
+    )
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError("At least one field is required.")
+        return attrs
+
+
+class NotificationTemplateSerializer(serializers.ModelSerializer):
+    notification_template_id = serializers.UUIDField(
+        source="notificationtemplateid", read_only=True
+    )
+    event_type = serializers.CharField(source="eventtype", read_only=True)
+    subject_template = serializers.CharField(source="subjecttemplate", read_only=True)
+    body_template = serializers.CharField(source="bodytemplate", read_only=True)
+    is_active = serializers.BooleanField(source="isactive", read_only=True)
+    updated_at = serializers.DateTimeField(source="updatedat", read_only=True)
+    updated_by_id = serializers.UUIDField(
+        source="updatedbyid_id", read_only=True, allow_null=True
+    )
+
+    class Meta:
+        model = Notificationtemplate
+        fields = [
+            "notification_template_id",
+            "event_type",
+            "subject_template",
+            "body_template",
+            "is_active",
+            "updated_at",
+            "updated_by_id",
+        ]
+
+
+class NotificationTemplateUpdateSerializer(StrictFieldsMixin, serializers.Serializer):
+    subject_template = serializers.CharField(
+        required=False, max_length=500, trim_whitespace=False
+    )
+    body_template = serializers.CharField(
+        required=False, trim_whitespace=False, max_length=20000
+    )
+    is_active = serializers.BooleanField(required=False)
+
+    def validate_subject_template(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Subject template cannot be blank.")
+        if "\r" in value or "\n" in value:
+            raise serializers.ValidationError("Subject template must be one line.")
+        try:
+            return validate_template_text(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate_body_template(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Body template cannot be blank.")
+        try:
+            return validate_template_text(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError("At least one field is required.")
         return attrs
 
 

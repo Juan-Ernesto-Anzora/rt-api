@@ -11,10 +11,14 @@ from rest_framework_simplejwt.views import (
 from apps.common import views as common_views
 from apps.rt.views import (
     AdminAuditView,
+    AdminFeatureFlagDetailView,
+    AdminFeatureFlagListView,
     AdminMembershipDetailView,
     AdminMembershipListCreateView,
     AdminMembershipRoleAssignView,
     AdminMembershipRoleDetailView,
+    AdminNotificationTemplateDetailView,
+    AdminNotificationTemplateListView,
     AdminPermissionListView,
     AdminPermissionsView,
     AdminRoleDetailView,
@@ -23,6 +27,7 @@ from apps.rt.views import (
     AdminRolePermissionDetailView,
     AdminSlaPolicyDetailView,
     AdminSlaPolicyListCreateView,
+    AdminTenantSettingsView,
     AdminUserDetailView,
     AdminUserListCreateView,
     AdminWorkflowDetailView,
@@ -151,6 +156,31 @@ urlpatterns = [
         "api/admin/sla-policies/<uuid:sla_policy_id>/",
         AdminSlaPolicyDetailView.as_view(),
         name="admin-sla-policy-detail",
+    ),
+    path(
+        "api/admin/settings/",
+        AdminTenantSettingsView.as_view(),
+        name="admin-settings",
+    ),
+    path(
+        "api/admin/feature-flags/",
+        AdminFeatureFlagListView.as_view(),
+        name="admin-feature-flags",
+    ),
+    path(
+        "api/admin/feature-flags/<str:key>/",
+        AdminFeatureFlagDetailView.as_view(),
+        name="admin-feature-flag-detail",
+    ),
+    path(
+        "api/admin/notification-templates/",
+        AdminNotificationTemplateListView.as_view(),
+        name="admin-notification-templates",
+    ),
+    path(
+        "api/admin/notification-templates/<uuid:template_id>/",
+        AdminNotificationTemplateDetailView.as_view(),
+        name="admin-notification-template-detail",
     ),
     path(
         "api/admin/workflows/",
