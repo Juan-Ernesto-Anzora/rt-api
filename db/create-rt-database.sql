@@ -145,10 +145,22 @@ CREATE TABLE dbo.SlaPolicy (
   Name NVARCHAR(100) NOT NULL,
   AppliesTo NVARCHAR(MAX) NULL,
   Targets NVARCHAR(MAX) NULL,
+  Priority NVARCHAR(20) NOT NULL,
+  ResponseMinutes INT NOT NULL,
+  ResolutionMinutes INT NOT NULL,
+  IsActive BIT NOT NULL CONSTRAINT DF_SlaPolicy_IsActive DEFAULT(1),
   CreatedAt DATETIME2(3) NOT NULL CONSTRAINT DF_SlaPolicy_CreatedAt DEFAULT dbo.utc_now(),
+  UpdatedAt DATETIME2(3) NULL,
   CONSTRAINT PK_SlaPolicy PRIMARY KEY CLUSTERED (PolicyId),
+  CONSTRAINT UQ_SlaPolicy_TenantName UNIQUE (TenantId, Name),
+  CONSTRAINT CK_SlaPolicy_Priority CHECK (Priority IN (N'low', N'normal', N'high', N'urgent')),
+  CONSTRAINT CK_SlaPolicy_ResponseMinutes CHECK (ResponseMinutes > 0),
+  CONSTRAINT CK_SlaPolicy_ResolutionMinutes CHECK (ResolutionMinutes > 0),
+  CONSTRAINT CK_SlaPolicy_TargetOrder CHECK (ResponseMinutes <= ResolutionMinutes),
   CONSTRAINT FK_SlaPolicy_Tenant FOREIGN KEY (TenantId) REFERENCES dbo.Tenant(TenantId) ON DELETE CASCADE
 );
+CREATE INDEX IX_SlaPolicy_TenantActivePriority
+  ON dbo.SlaPolicy(TenantId, IsActive, Priority);
 
 -------------------------------------------------------------------------------
 -- CHILD TABLES

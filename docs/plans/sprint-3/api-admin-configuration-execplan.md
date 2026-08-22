@@ -523,6 +523,367 @@ fake request solely for auditing.
 10. Run focused tests, full checks, generated OpenAPI checks, and Postman steps;
     keep this ExecPlan current throughout implementation.
 
+### Milestone 4: SLA Policies, Reports, and CSV Export
+
+Day 7 lets authorized tenant administrators configure explicit response and
+resolution targets by request priority, and lets reporting users inspect a
+tenant-scoped operational summary or export the matching requests to CSV. This
+milestone is planning-only until reviewed. No API, model, SQL, or seed changes
+are approved by this section alone.
+
+#### Day 7 repository orientation
+
+Expected implementation files:
+
+- `apps/rt/models.py`: evolve the existing unmanaged `Slapolicy` mapping; do
+  not add a second policy table or a fictional `Slatimer` model.
+- `apps/rt/serializers.py`: add public SLA read/write serializers, a shared
+  report-filter serializer, and report summary serializers.
+- `apps/rt/services/admin_permissions.py`: add constants for the already
+  catalogued `sla.manage`, `reports.read`, and `reports.export` permissions.
+- `apps/rt/services/admin_audit.py`: reuse tenant-level audit writes for SLA
+  configuration and successful CSV exports.
+- `apps/rt/services/sla_service.py`: proposed transactional SLA policy service
+  for tenant lookups, duplicate handling, timestamps, and audit behavior.
+- `apps/rt/services/report_service.py`: proposed shared, tenant-scoped request
+  filter and aggregate service used by summary and CSV export.
+- `apps/rt/views.py`: add guarded SLA admin and report APIViews.
+- `rt_api/urls.py`: register the four Day 7 routes before `/api/schema`.
+- `rt_api/settings.py`: make timezone behavior explicit and add a bounded CSV
+  export limit setting.
+- `db/create-rt-database.sql`: evolve the existing fresh-create `SlaPolicy`
+  definition; preserve `PolicyId` and do not create a duplicate table.
+- `db/upgrade-sprint3-sla-reports.sql`: proposed idempotent existing-database
+  upgrade and ACME demo defaults.
+- `tests/test_admin_sla_policies.py`: SLA CRUD, validation, RBAC, tenant
+  isolation, audit, legacy schema, and generated OpenAPI coverage.
+- `tests/test_reports.py`: summary/filter/RBAC/tenant/date/query/performance
+  behavior and generated OpenAPI coverage.
+- `tests/test_report_export.py`: CSV columns, escaping, row limit, filters,
+  permission, audit, and no-N+1 coverage.
+- `docs/plans/sprint-3/api-admin-configuration-execplan.md`: keep this plan's
+  progress, discoveries, decisions, and outcomes current.
+
+The repository still has no static OpenAPI YAML. Day 7 must define serializers,
+query parameters, response types, CSV media type, error examples, and routes
+through drf-spectacular before endpoint implementation, then assert the
+generated `/api/schema` document in pytest.
+
+#### Confirmed Day 7 schema and behavior
+
+Checked-in DDL, unmanaged models, generated OpenAPI, and SELECT-only live SQL
+Server inspection on 2026-08-17 establish:
+
+- `dbo.SlaPolicy` already exists. Its live and checked-in columns are
+  `PolicyId`, `TenantId`, `Name`, nullable `AppliesTo`, nullable `Targets`, and
+  `CreatedAt`. It has only a primary key and tenant foreign key; there is no
+  tenant/name unique constraint or supporting tenant index.
+- `apps/rt/models.py` maps that table as unmanaged `Slapolicy`. Do not create a
+  duplicate `SlaPolicy` table.
+- `dbo.SlaTimer` does not exist in the live database, is not created by the
+  checked-in DDL, and has no Django model. The DDL contains only a defensive
+  drop for an earlier possible table. Day 7 must not invent a timer table.
+- The live `SlaPolicy` table has zero rows, so the current development database
+  has no legacy policies requiring data conversion.
+- `Request.Priority` and `RequestSerializer` use exactly `low`, `normal`,
+  `high`, and `urgent`; the database has the same check constraint.
+- Status categories are constrained to and represented by `open`,
+  `in_progress`, `waiting`, and `closed`.
+- `Request.DueAt` is nullable `datetime2(3)`. The API accepts it directly on
+  create/update and does not derive it from an SLA policy. The live database
+  has 11 requests, 2 with null `DueAt`, and no request-to-policy link.
+- The dashboard summary already computes open/in-progress/waiting/closed,
+  due-today, overdue, unassigned, and assigned-to-me counts, but its
+  assigned-to-me input currently uses Django `auth_user.id`; that integer does
+  not match `dbo.User.UserId`, so the current helper returns zero instead of a
+  reliable domain-user count.
+- Django's effective timezone is implicitly `America/Chicago` because the
+  project does not set `TIME_ZONE`; `USE_TZ` is true. SQL defaults use UTC.
+- `sla.manage`, `reports.read`, and `reports.export` already exist in the live
+  permission catalogue. ACME `RT Admin` has all three, `RT Manager` has both
+  report permissions, and `RT Viewer` has `reports.read`.
+- Generated OpenAPI currently has no SLA or report routes. It exposes JWT
+  bearer auth and represents `due_at` as a nullable date-time, but the priority
+  schema is a generic string rather than an explicit enum.
+
+#### Existing-table SLA schema decision
+
+The legacy `AppliesTo`/`Targets` JSON-like structure is not sufficient for the
+requested API because it has no explicit priority, positive minute targets,
+active flag, or update timestamp. Evolve `dbo.SlaPolicy` in place rather than
+creating another table:
+
+```text
+PolicyId UNIQUEIDENTIFIER primary key (preserved)
+TenantId UNIQUEIDENTIFIER foreign key (preserved)
+Name NVARCHAR(100) not null (preserved)
+Priority NVARCHAR(20) not null
+ResponseMinutes INT not null
+ResolutionMinutes INT not null
+IsActive BIT not null default 1
+CreatedAt DATETIME2(3) not null (preserved)
+UpdatedAt DATETIME2(3) null
+AppliesTo NVARCHAR(MAX) null (preserved, deprecated, not exposed)
+Targets NVARCHAR(MAX) null (preserved, deprecated, not exposed)
+```
+
+Keep the physical key name `PolicyId` to avoid a destructive rename. Expose it
+as public `sla_policy_id`. Add:
+
+- `CK_SlaPolicy_Priority` for `low`, `normal`, `high`, `urgent`.
+- positive checks for both minute columns.
+- `ResponseMinutes <= ResolutionMinutes` validation in both SQL and DRF.
+- tenant/name uniqueness, consistent with other tenant configuration tables.
+- an index beginning with `TenantId` and supporting `IsActive`, `Priority`.
+
+The existing development table is empty, but the upgrade must still be
+idempotent and fail clearly rather than invent business targets if it encounters
+legacy non-demo rows lacking explicit values. Preserve `AppliesTo` and `Targets`
+so a later migration can interpret them deliberately. Update both fresh DDL and
+the existing-database upgrade following the repository convention, and validate
+the upgrade with SQL Server `SET PARSEONLY ON` before any application.
+
+Do not add `DELETE`. Deactivation uses `PATCH {"is_active": false}` and remains
+safe if request/policy or timer relationships are introduced later. The current
+schema has no policy references from requests and no timer table, but absence of
+references today is not a reason to establish a hard-delete contract.
+
+#### SLA administration contract
+
+Routes:
+
+- `GET /api/admin/sla-policies/`
+- `POST /api/admin/sla-policies/`
+- `GET /api/admin/sla-policies/{sla_policy_id}/`
+- `PATCH /api/admin/sla-policies/{sla_policy_id}/`
+
+All four routes require JWT, `X-Tenant`, baseline `admin.read`, and
+`sla.manage`. Reads and identifier lookups always include
+`tenantid_id=request.tenant_id`; a cross-tenant UUID returns `404`.
+
+Public response fields:
+
+```text
+sla_policy_id
+name
+priority
+response_minutes
+resolution_minutes
+is_active
+created_at
+updated_at
+```
+
+Create accepts `name`, `priority`, `response_minutes`, `resolution_minutes`, and
+optional `is_active` defaulting true. PATCH is partial over those same mutable
+fields. Normalize priority to lowercase and trim names. Reject blank names,
+unknown priorities, zero/negative minute values, response greater than
+resolution, malformed UUIDs, and duplicate tenant/name with clean
+`400`/`404`/`409` JSON responses; never expose SQL errors.
+
+The list uses `page`, `page_size` capped at 100, safe `sort`, and optional
+`priority`, `is_active`, and `search` filters. Safe sort fields are `name`,
+`priority`, `response_minutes`, `resolution_minutes`, `created_at`, and
+`updated_at`; default is `priority,name` using an explicit priority ordering
+rather than alphabetical order.
+
+Every successful state-changing request writes exactly one tenant-level
+`Activity` in the same transaction with `requestid_id=None`:
+
+```text
+admin.sla_policy.created
+admin.sla_policy.updated
+admin.sla_policy.deactivated
+```
+
+Rejected and no-op requests write no audit row. Audit payloads use public IDs,
+priority, and changed fields without serializing internal model names.
+
+#### ACME demo SLA defaults
+
+The upgrade inserts these policies only when tenant code `ACME` exists and the
+same tenant/name is missing. They are ordinary editable rows, not hard-coded
+runtime rules:
+
+| Name | Priority | Response minutes | Resolution minutes |
+| --- | --- | ---: | ---: |
+| Low | `low` | 240 | 4320 |
+| Normal | `normal` | 120 | 1440 |
+| High | `high` | 30 | 480 |
+| Urgent | `urgent` | 15 | 120 |
+
+Use `MERGE` or `NOT EXISTS` keyed by ACME `TenantId` plus policy name. Never
+update existing values during seed reruns. Companion `rt-infra` must apply the
+upgrade after tenant creation; record that handoff explicitly at completion.
+
+#### Report authorization and identity
+
+Routes:
+
+- `GET /api/reports/summary/` requires `reports.read`.
+- `GET /api/reports/requests/export/?format=csv` requires `reports.export`.
+
+Report routes require JWT and `X-Tenant` but are not admin routes and therefore
+do not require `admin.read`. Reuse effective tenant membership/permission
+resolution without weakening the existing admin baseline. Extract or wrap the
+auth-user-to-domain-user resolution so reports map verified email to
+`dbo.User.UserId`, confirm active-tenant membership, and use that UUID for
+`assigned_to_me`; do not use Django's integer user id.
+
+Add constants for the existing catalogue strings only:
+
+```text
+SLA_MANAGE_PERMISSION = "sla.manage"
+REPORTS_READ_PERMISSION = "reports.read"
+REPORTS_EXPORT_PERMISSION = "reports.export"
+```
+
+Do not add new permission codes or role mappings in Day 7.
+
+#### Shared report filters
+
+Define one serializer and one tenant-scoped filter service for both summary and
+CSV export. Supported query parameters:
+
+```text
+q
+status_id
+status_category
+priority
+flow_id
+requester_id
+assignee_id
+created_from
+created_to
+updated_from
+updated_to
+due_from
+due_to
+```
+
+Validation and behavior:
+
+- Validate UUIDs through DRF and verify status, flow, requester, and assignee
+  IDs belong to the active tenant before querying. Cross-tenant filters return
+  clean `404` or field-level `400` and never broaden the result set.
+- Validate `status_category` against `open`, `in_progress`, `waiting`, `closed`
+  and priority against `low`, `normal`, `high`, `urgent`.
+- Reject an upper date bound earlier than its lower bound.
+- Parse ISO-8601 aware datetimes. Set `TIME_ZONE` explicitly from an environment
+  variable with UTC default and retain `USE_TZ=True`; SQL Server stores UTC
+  `datetime2(3)`. Convert filters to UTC and use parameterized half-open ranges
+  where a calendar-day boundary is needed.
+- `q` should preserve the existing unified FTS meaning across request title or
+  description, comment text, and attachment filename. Refactor the current
+  parameterized FTS builder so reports can obtain distinct tenant-scoped
+  request IDs without inheriting search endpoint pagination. Do not interpolate
+  user text into SQL.
+- Start from `Request.objects.filter(tenantid_id=tenant_id)` and use
+  `select_related("flowid", "statusid", "requesterid", "assigneeid")` for row
+  output. Aggregate queries may use `values(...).annotate(...)`; no per-row
+  lookup loops.
+- Apply identical filters to summary and export and add a test proving both
+  select the same request IDs for representative combinations.
+
+#### Report summary response
+
+Return bounded aggregate JSON:
+
+```json
+{
+  "total": 0,
+  "open": 0,
+  "in_progress": 0,
+  "waiting": 0,
+  "closed": 0,
+  "due_today": 0,
+  "overdue": 0,
+  "unassigned": 0,
+  "assigned_to_me": 0,
+  "by_priority": [
+    {"priority": "normal", "count": 0}
+  ],
+  "by_status": [
+    {
+      "status_id": "00000000-0000-0000-0000-000000000000",
+      "name": "Open",
+      "category": "open",
+      "count": 0
+    }
+  ]
+}
+```
+
+`total` is the count after report filters. Due/overdue counts exclude closed or
+terminal requests and null `DueAt`, matching dashboard semantics. Build the
+summary with conditional aggregation where practical rather than issuing one
+query per KPI. `by_priority` has at most four entries and `by_status` is bounded
+by tenant workflow configuration, so this aggregate endpoint does not need row
+pagination. Day 7 introduces no JSON request-list report; any future row list
+must use standard `page`/`page_size` pagination.
+
+Do not expose SLA compliance counts in Day 7. There is no `SlaTimer`, no request
+policy link, no first-response timestamp, and no reliable resolution timestamp;
+`DueAt` is manually supplied. Record omission in OpenAPI and the response
+description. Add compliance fields only after a later lifecycle milestone can
+calculate them from durable events.
+
+#### CSV export contract and safety
+
+`format` is required and only `csv` is accepted. Return `text/csv; charset=utf-8`
+with a safe attachment filename and these columns in this exact order:
+
+```text
+request_id
+human_id
+title
+flow
+status
+priority
+requester
+assignee
+due_at
+created_at
+updated_at
+```
+
+Serialize timestamps as ISO-8601 UTC values and empty nullable values as empty
+cells. Use Python's `csv` module and a streaming or iterator response. Prevent
+spreadsheet formula injection by prefixing text cells beginning with `=`, `+`,
+`-`, `@`, tab, or carriage return. Do not export descriptions, custom fields,
+comments, attachment URLs, or hidden internal IDs beyond the approved columns.
+
+Add `REPORT_EXPORT_MAX_ROWS`, environment-configurable with a conservative
+default of 10,000. Count the filtered queryset first; if it exceeds the limit,
+return clean `400 export_limit_exceeded` with the configured limit and require
+narrower filters. Never silently truncate. Order rows deterministically by
+`-updatedat`, then `requestid`, and stream using an iterator chunk size so memory
+does not scale with the full export.
+
+After a successful export is prepared, write one tenant-level audit event
+`report.requests.exported` containing actor id, normalized filters, row count,
+and format. Do not include exported request content in the audit payload. A
+rejected or over-limit export creates no audit event.
+
+#### Day 7 implementation order
+
+1. Create the Day 7 feature branch from the branch containing merged Day 5-6
+   permission/audit services; do not implement on a stale `main`.
+2. Add OpenAPI serializers, query parameters, CSV response metadata, error
+   examples, and route declarations first; assert all four paths in tests.
+3. Add the explicit permission constants and reusable tenant report context.
+4. Evolve `Slapolicy`, fresh DDL, and the idempotent upgrade in place. Preserve
+   legacy columns and parse-check SQL without applying it.
+5. Implement transactional SLA policy service and guarded admin views.
+6. Implement one shared report-filter service, including parameterized FTS and
+   correct domain-user mapping for `assigned_to_me`.
+7. Implement aggregate summary and bounded, formula-safe CSV streaming export.
+8. Add SLA-write and export audit events.
+9. Run focused tests, full repository checks, SQL parse-only validation, query
+   count assertions, and the Postman sequence.
+10. Apply the SQL through companion `rt-infra` only after separate approval;
+    keep this plan current throughout implementation.
+
 ## Tests and Verification
 
 Automated verification for Day 1-2 is listed in Milestone 1 Step 8.
@@ -718,6 +1079,124 @@ Repeat representative reads/writes with no JWT, no tenant header,
 user, the final RT Admin membership, and the actor's own final admin role.
 Expected errors are clean JSON and never contain SQL or tracebacks.
 
+Day 7 automated verification:
+
+```bash
+poetry run python manage.py check
+poetry run pytest tests/test_admin_sla_policies.py tests/test_reports.py tests/test_report_export.py -q
+poetry run pytest tests/test_dashboard_summary.py tests/test_search.py -q
+poetry run pytest -q
+poetry run ruff check .
+poetry run black . --check
+poetry run isort . --check --diff
+git diff --check
+```
+
+Required Day 7 tests:
+
+- SLA list/create/detail/update/deactivate happy paths use public snake_case
+  fields and write exactly one expected audit event for each real change.
+- SLA name/priority/minute normalization works; blank names, unsupported
+  priorities, non-positive targets, response greater than resolution,
+  duplicates, malformed UUIDs, and no-op PATCH fail cleanly without audit.
+- SLA reads and writes require JWT, tenant, `admin.read`, and `sla.manage`;
+  cross-tenant IDs return `404` and lists never leak another tenant.
+- There is no SLA DELETE route, no duplicate policy table, and no `SlaTimer`
+  model/table added by Day 7.
+- Fresh and upgrade SQL preserve legacy policy columns, add explicit columns
+  and constraints idempotently, contain the four ACME defaults, and pass SQL
+  Server parse-only validation.
+- Report summary/export require JWT, tenant membership, and their exact report
+  permissions. `reports.read` alone cannot export; `reports.export` alone does
+  not implicitly grant summary access.
+- Every report filter works independently and in representative combinations;
+  invalid/cross-tenant UUIDs, invalid category/priority, reversed ranges, and
+  malformed datetimes return `400`/`404`, never `500`.
+- `q` remains parameterized, tenant-scoped, and matches request, comment, and
+  attachment filename FTS results without duplicate requests.
+- Summary counts include total, four categories, due today, overdue,
+  unassigned, assigned to the correctly mapped domain user, by-priority, and
+  by-status. Null due dates and closed/terminal requests are excluded from due
+  breach counts.
+- Summary uses bounded aggregate queries and export row serialization uses
+  `select_related`; query-count regression tests prevent per-row flow/status/
+  requester/assignee lookups.
+- CSV has the exact column order, deterministic ordering, UTF-8 content type,
+  ISO UTC timestamps, correct empty values, RFC-compatible quoting, and formula
+  injection protection.
+- Export above `REPORT_EXPORT_MAX_ROWS` is rejected without truncation or audit;
+  a successful export writes one `report.requests.exported` audit row.
+- Summary and CSV apply the same normalized filters to the same request set.
+- Generated OpenAPI includes all four routes, filter parameters, permission
+  descriptions, SLA request/response examples, CSV media type, export limit
+  error, and the intentional absence of SLA compliance counts.
+
+Day 7 Postman environment:
+
+```text
+base_url=http://localhost:8000
+tenant_code=ACME
+TOKEN=<JWT with active-tenant admin.read, sla.manage, reports.read, reports.export>
+report_read_token=<JWT with reports.read but not reports.export>
+report_export_token=<JWT with reports.export but not reports.read>
+non_admin_token=<JWT without Day 7 permissions>
+other_tenant_code=<second tenant code>
+sla_policy_id=<ACME SLA policy UUID returned by create/list>
+flow_id=<ACME flow UUID>
+status_id=<ACME status UUID>
+requester_id=<ACME domain user UUID>
+assignee_id=<ACME domain user UUID>
+```
+
+Use `Authorization: Bearer {{TOKEN}}`, `X-Tenant: {{tenant_code}}`, and JSON
+content type for SLA writes.
+
+SLA sequence:
+
+```http
+GET  {{base_url}}/api/admin/sla-policies/?page=1&page_size=25&sort=name
+POST {{base_url}}/api/admin/sla-policies/
+GET  {{base_url}}/api/admin/sla-policies/{{sla_policy_id}}/
+PATCH {{base_url}}/api/admin/sla-policies/{{sla_policy_id}}/
+```
+
+Create body:
+
+```json
+{
+  "name": "Normal",
+  "priority": "normal",
+  "response_minutes": 120,
+  "resolution_minutes": 1440,
+  "is_active": true
+}
+```
+
+Deactivate body:
+
+```json
+{"is_active": false}
+```
+
+Reporting sequence:
+
+```http
+GET {{base_url}}/api/reports/summary/
+GET {{base_url}}/api/reports/summary/?priority=urgent&status_category=open
+GET {{base_url}}/api/reports/summary/?q=vpn&created_from=2026-01-01T00:00:00Z&created_to=2027-01-01T00:00:00Z
+GET {{base_url}}/api/reports/requests/export/?format=csv
+GET {{base_url}}/api/reports/requests/export/?format=csv&flow_id={{flow_id}}&status_id={{status_id}}&due_from=2026-01-01T00:00:00Z&due_to=2027-01-01T00:00:00Z
+GET {{base_url}}/api/admin/audit/?type=admin.sla_policy.updated&page=1&page_size=10
+GET {{base_url}}/api/admin/audit/?type=report.requests.exported&page=1&page_size=10
+GET {{base_url}}/api/schema
+```
+
+Repeat representative calls with no JWT, no tenant, each limited token,
+`non_admin_token`, `other_tenant_code`, cross-tenant IDs, invalid priority,
+zero/negative targets, response greater than resolution, duplicate name,
+invalid/reversed dates, unsupported `format`, and an intentionally over-limit
+export. Confirm clean JSON failures and no SQL or stack-trace disclosure.
+
 ## Acceptance Criteria
 
 Day 1-2 acceptance:
@@ -752,6 +1231,31 @@ Day 5-6 acceptance:
   fake request.
 - Focused tests, full pytest, Django check, Ruff, Black, isort, OpenAPI checks,
   SQL parse-only validation, and `git diff --check` pass.
+
+Day 7 acceptance:
+
+- The existing `dbo.SlaPolicy` is evolved in place and mapped with explicit
+  priority, response/resolution minutes, active state, and update timestamp;
+  no duplicate SLA policy or timer table is created.
+- All SLA endpoints require JWT, tenant context, baseline `admin.read`, and
+  `sla.manage`; cross-tenant data cannot be read or changed.
+- SLA policy values use the Request API priority vocabulary and positive,
+  internally consistent minute targets. Deactivation replaces hard delete.
+- ACME demo defaults are additive, editable, and never overwrite existing
+  tenant policy values.
+- Report summary and CSV use one tenant-scoped normalized filter contract and
+  exact `reports.read`/`reports.export` enforcement.
+- Summary returns reliable request aggregates only; it does not claim SLA
+  compliance until durable timer/response/resolution data exists.
+- CSV uses the exact approved columns, avoids N+1 queries and formula injection,
+  streams deterministically, and rejects rather than truncates over-limit data.
+- Date handling is explicit UTC end to end, with correct inclusive/lower and
+  exclusive/upper boundaries documented and tested.
+- Successful SLA writes and exports create tenant-level audit records; failed
+  and no-op operations do not.
+- Generated OpenAPI, focused/full pytest, Django check, Ruff, Black, isort, SQL
+  parse-only validation, query-count checks, Postman verification, and
+  `git diff --check` pass before merge.
 
 ## Progress
 
@@ -811,6 +1315,31 @@ Day 5-6 acceptance:
 - [ ] Apply `db/upgrade-sprint3-admin-users-roles.sql` through the companion
   `rt-infra` deployment/seed path before Postman testing against existing data.
 - [ ] Day 5-6 Postman sequence completed against the upgraded local database.
+- [x] Day 7 repository guidance and active ExecPlan read in full before planning.
+- [x] Day 7 checked-in DDL, unmanaged models, request priorities/statuses,
+  `DueAt`, dashboard summary, permissions, generated OpenAPI, and tests inspected.
+- [x] Day 7 read-only `rt_sqlserver` MCP connection attempted; timeout recorded.
+- [x] Day 7 live schema/data fallback inspected with SELECT-only queries through
+  Django's configured SQL Server connection.
+- [x] Day 7 self-contained SLA/report/export plan prepared for review.
+- [x] Day 7 implementation approved.
+- [x] Day 7 feature branch `feat/api-sla-reports` selected from the Day 5-6
+  foundation.
+- [x] Day 7 generated OpenAPI contract implemented with request/response examples.
+- [x] Existing unmanaged SLA model and fresh-database DDL evolved in place; an
+  idempotent companion upgrade and non-overwriting ACME defaults were added.
+- [x] SLA administration endpoints implemented and covered by focused tests.
+- [x] Report summary and safe streaming CSV export implemented and covered by
+  focused tests.
+- [x] Day 7 focused tests, full 145-test suite, Django check, and Ruff passed in
+  an isolated Python 3.12 runtime after the host Poetry interpreter disappeared.
+- [x] Final Black check passed for all 42 Python files; isort check passed for
+  the exact Day 7 Python files (the slim test image has no `git` executable for
+  repository-wide skip discovery).
+- [x] `git diff --check` passed.
+- [ ] Apply and SQL Server parse/execute-verify
+  `db/upgrade-sprint3-sla-reports.sql` through the companion infrastructure path.
+- [ ] Day 7 Postman sequence completed against the upgraded local database.
 
 ## Surprises & Discoveries
 
@@ -872,6 +1401,46 @@ Day 5-6 acceptance:
 - 2026-07-31: SQL Server accepted the additive Day 5-6 upgrade under
   `SET PARSEONLY ON`; this validated syntax without applying schema or data
   changes to the development database.
+- 2026-08-17: The `rt_sqlserver` MCP remains configured but timed out connecting
+  to `host.docker.internal:1433`. SELECT-only fallback inspection through
+  Django's working SQL Server connection was used; no data or schema changed.
+- 2026-08-17: `SlaPolicy` is not absent, but its live legacy shape is not usable
+  for the requested typed API. It has `PolicyId`, tenant, name, opaque nullable
+  `AppliesTo`/`Targets`, and created time only. It has zero live rows, no
+  tenant/name uniqueness, and no tenant-leading support index.
+- 2026-08-17: `SlaTimer` does not exist live or as a Django model and is not
+  created by current DDL. The lone DDL reference is a defensive drop statement.
+- 2026-08-17: `DueAt` is user-supplied and not linked to an SLA policy. The live
+  database has 11 requests and 2 null due dates, but no durable first-response,
+  resolution, policy-link, or timer data from which SLA compliance can be
+  calculated honestly.
+- 2026-08-17: The existing dashboard passes Django `auth_user.id` into a UUID
+  domain-user counter. That makes `assigned_to_me` return zero for normal local
+  auth users; Day 7 reporting must resolve the domain user by verified email and
+  active-tenant membership instead.
+- 2026-08-17: Django's timezone is implicitly `America/Chicago` because the
+  project does not set it, while SQL defaults are UTC. Day 7 needs an explicit
+  UTC default before date-range and due-today reporting can be deterministic.
+- 2026-08-17: The live catalogue and ACME mappings already support Day 7:
+  `RT Admin` has `sla.manage`, `reports.read`, and `reports.export`; `RT Manager`
+  has both report permissions; `RT Viewer` has report read only.
+- 2026-08-17: Generated OpenAPI has JWT security and nullable date-time
+  `due_at`, but no SLA/report paths and no enum on request priority. Existing
+  unrelated schema-generation warnings are recorded but are not Day 7 scope.
+- 2026-08-17: All RT domain models, including `Slapolicy`, remain
+  `managed = False`; Day 7 therefore follows the fresh DDL plus idempotent SQL
+  upgrade convention and deliberately adds no Django migration.
+- 2026-08-17: DRF reserves `?format=` for renderer negotiation by default. The
+  required `?format=csv` contract returned 404 until `URL_FORMAT_OVERRIDE` was
+  disabled so the export serializer could validate the public query field.
+- 2026-08-17: SQL Server can compile references to new columns before guarded
+  `ALTER TABLE` statements execute. The companion script uses guarded dynamic
+  DDL/DML after column creation so pre-upgrade schemas remain compilable and
+  rerunnable.
+- 2026-08-17: The host `poetry.exe` shim points to a removed Python 3.12
+  interpreter. Verification used an ephemeral Python 3.12 Docker runtime with
+  the lockfile and Linux ODBC runtime; it did not alter dependency files or the
+  live database.
 
 ## Decision Log
 
@@ -931,6 +1500,34 @@ Day 5-6 acceptance:
   `order_by`.
 - 2026-07-31: Seed the exact 18-code permission catalogue and canonical role
   mappings additively. The API exposes no permission catalogue mutation route.
+- 2026-08-17: Evolve `dbo.SlaPolicy` in place and preserve physical `PolicyId`
+  plus deprecated `AppliesTo`/`Targets`; expose `sla_policy_id` publicly and do
+  not create a duplicate policy table or a speculative timer table.
+- 2026-08-17: Do not expose SLA policy DELETE. Use `is_active` deactivation so
+  future request/timer references do not force a breaking API correction.
+- 2026-08-17: Treat the four ACME policies as additive demo seed data keyed by
+  tenant and name. They remain editable business data and seed reruns never
+  overwrite custom values.
+- 2026-08-17: Require `admin.read` plus `sla.manage` only for the admin SLA
+  routes. Report routes are tenant features, not admin routes, and require their
+  exact `reports.read` or `reports.export` permission without `admin.read`.
+- 2026-08-17: Omit SLA compliance from Day 7 summary because the current model
+  cannot calculate it reliably. Manual `DueAt` is not a substitute for policy,
+  first-response, resolution, or timer evidence.
+- 2026-08-17: Use one normalized filter service for report summary and export,
+  preserving parameterized unified FTS behavior and resolving the current RT
+  domain user rather than using Django's integer auth id.
+- 2026-08-17: Cap CSV export at an environment-configurable 10,000 rows by
+  default, reject over-limit results instead of truncating, stream deterministic
+  output, and neutralize spreadsheet formula prefixes.
+- 2026-08-17: Make Django timezone explicit with an environment-controlled UTC
+  default and keep `USE_TZ=True`; normalize report inputs and CSV output to UTC.
+- 2026-08-17: Disable DRF's URL format override because the public report
+  contract owns `format`. Content negotiation remains header-based, and invalid
+  export values now return structured validation errors instead of renderer 404s.
+- 2026-08-17: Keep report authorization outside the admin-area baseline:
+  reports require exactly `reports.read` or `reports.export`; SLA administration
+  continues to require both `admin.read` and `sla.manage`.
 
 ## Outcomes & Retrospective
 
@@ -990,3 +1587,23 @@ Milestone 3 implementation is complete on `feat/api-admin-users-roles`:
 - Verification passed: Django system check, focused and full pytest, Ruff,
   Black, isort, and `git diff --check`. Postman verification remains pending
   until the companion infrastructure path applies the upgrade SQL.
+
+Milestone 4 implementation is complete on `feat/api-sla-reports`:
+
+- Evolved the existing unmanaged `SlaPolicy` mapping and fresh-database DDL
+  without creating a duplicate policy/timer table or a Django migration.
+- Added tenant-scoped SLA list/create/detail/update/deactivate behavior with
+  `admin.read` plus `sla.manage`, positive target validation, duplicate
+  protection, transactions, and audit activity for every successful write.
+- Added tenant-scoped report summary and bounded streaming CSV export with the
+  exact `reports.read` and `reports.export` permissions and shared filters.
+- CSV output uses the standard writer for commas, quotes, and line breaks,
+  neutralizes spreadsheet-formula prefixes, uses UTC timestamps, and returns a
+  safe attachment filename under `text/csv; charset=utf-8`.
+- Added generated OpenAPI examples and 28 focused SLA/report/export tests. The
+  full 145-test API suite, Django system check, Ruff, Black, scoped isort, and
+  `git diff --check` passed after formatting.
+- Added `db/upgrade-sprint3-sla-reports.sql`; it must be applied and verified
+  through the companion infrastructure path before local SLA API/Postman tests.
+- SLA compliance remains explicitly deferred until durable request-policy,
+  first-response, resolution, and timer data exists.

@@ -84,6 +84,9 @@ DATABASES = {
 STATIC_URL = "static/"
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 
+TIME_ZONE = os.getenv("TIME_ZONE", "UTC")
+USE_TZ = True
+
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = ["http://localhost:5173"]
@@ -99,7 +102,10 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 25,
+    "URL_FORMAT_OVERRIDE": None,
 }
+
+REPORT_EXPORT_MAX_ROWS = int(os.getenv("REPORT_EXPORT_MAX_ROWS", "10000"))
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "Request Tracker API",

@@ -21,6 +21,8 @@ from apps.rt.views import (
     AdminRoleListCreateView,
     AdminRolePermissionAssignView,
     AdminRolePermissionDetailView,
+    AdminSlaPolicyDetailView,
+    AdminSlaPolicyListCreateView,
     AdminUserDetailView,
     AdminUserListCreateView,
     AdminWorkflowDetailView,
@@ -35,6 +37,8 @@ from apps.rt.views import (
     CommentViewSet,
     DashboardSummaryView,
     FlowViewSet,
+    ReportRequestExportView,
+    ReportSummaryView,
     RequestViewSet,
     SearchView,
     UserLookupViewSet,
@@ -139,6 +143,16 @@ urlpatterns = [
         name="admin-role-permission-detail",
     ),
     path(
+        "api/admin/sla-policies/",
+        AdminSlaPolicyListCreateView.as_view(),
+        name="admin-sla-policies",
+    ),
+    path(
+        "api/admin/sla-policies/<uuid:sla_policy_id>/",
+        AdminSlaPolicyDetailView.as_view(),
+        name="admin-sla-policy-detail",
+    ),
+    path(
         "api/admin/workflows/",
         AdminWorkflowListCreateView.as_view(),
         name="admin-workflows",
@@ -167,6 +181,16 @@ urlpatterns = [
         "api/admin/workflows/<uuid:flow_id>/transitions/<uuid:transition_id>/",
         AdminWorkflowTransitionDetailView.as_view(),
         name="admin-workflow-transition-detail",
+    ),
+    path(
+        "api/reports/summary/",
+        ReportSummaryView.as_view(),
+        name="report-summary",
+    ),
+    path(
+        "api/reports/requests/export/",
+        ReportRequestExportView.as_view(),
+        name="report-request-export",
     ),
     path("api/schema", SpectacularAPIView.as_view(), name="schema"),
     path(
