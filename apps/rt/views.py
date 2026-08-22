@@ -5,8 +5,9 @@ from datetime import datetime
 import boto3
 from botocore.client import Config
 from django.conf import settings
-from django.db import connection, transaction
-from django.db.models import Case, IntegerField, Q, Value, When
+from django.db import IntegrityError, connection, transaction
+from django.db.models import Case, IntegerField, Prefetch, Q, Value, When
+from django.db.models.expressions import RawSQL
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
@@ -15,14 +16,17 @@ from drf_spectacular.utils import (
     OpenApiParameter,
     OpenApiResponse,
     extend_schema,
+    extend_schema_view,
 )
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, ValidationError
-from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from apps.common.pagination import StandardPageNumberPagination
+from apps.common.serializers import ErrorEnvelopeSerializer
 
 from .models import (
     Activity,
@@ -31,10 +35,12 @@ from .models import (
     Featureflag,
     Flow,
     Membership,
+    Membershiprole,
     Notificationtemplate,
     Permission,
     Request,
     Role,
+    Rolepermission,
     Slapolicy,
     Status,
     Tenantsetting,
@@ -44,6 +50,7 @@ from .models import (
 from .search import SearchValidationError, search_requests
 from .serializers import (
     ActivitySerializer,
+    AdminAuditFilterSerializer,
     AdminAuditSerializer,
     AdminDirectoryUserSerializer,
     AdminFlowSerializer,
@@ -67,6 +74,7 @@ from .serializers import (
     AdminUserCreateSerializer,
     AdminUserUpdateSerializer,
     AttachmentFinalizeRequestSerializer,
+    AttachmentFinalizeResponseSerializer,
     AttachmentInitRequestSerializer,
     AttachmentInitResponseSerializer,
     AttachmentSerializer,
@@ -77,6 +85,7 @@ from .serializers import (
     FlowLookupSerializer,
     NotificationTemplateSerializer,
     NotificationTemplateUpdateSerializer,
+    PaginatedAdminAuditResponseSerializer,
     ReportExportFilterSerializer,
     ReportFilterSerializer,
     ReportSummarySerializer,
@@ -85,6 +94,7 @@ from .serializers import (
     RequestSerializer,
     RequestTransitionSerializer,
     SearchQuerySerializer,
+    SearchResponseSerializer,
     StatusLookupSerializer,
     TenantSettingsResponseSerializer,
     TenantSettingsUpdateSerializer,
@@ -122,6 +132,7 @@ from .services.admin_permissions import (
     ADMIN_ROLES_PERMISSION,
     ADMIN_SETTINGS_PERMISSION,
     ADMIN_USERS_PERMISSION,
+    ADMIN_WORKFLOWS_PERMISSION,
     FEATURE_FLAGS_MANAGE_PERMISSION,
     NOTIFICATIONS_MANAGE_PERMISSION,
     REPORTS_EXPORT_PERMISSION,
@@ -131,6 +142,7 @@ from .services.admin_permissions import (
     AdminPermissionError,
     get_admin_context,
     require_admin_permissions,
+    resolve_tenant_user,
 )
 from .services.notification_service import (
     notify_comment_added,
@@ -541,11 +553,21 @@ class DashboardSummaryView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        try:
+            domain_user, _membership = resolve_tenant_user(request.user, tenant_id)
+            user_id = domain_user.userid
+        except AdminPermissionError:
+            user_id = None
         summary = build_dashboard_summary(
             queryset=Request.objects.filter(tenantid=tenant_id),
-            user_id=getattr(getattr(request, "user", None), "id", None),
+            user_id=user_id,
         )
         return Response(DashboardSummarySerializer(summary).data)
+
+
+@extend_schema_view(get=extend_schema(exclude=True))
+class LegacyDashboardSummaryView(DashboardSummaryView):
+    pass
 
 
 class AdminPermissionsView(APIView):
@@ -569,7 +591,26 @@ class AdminAuditView(APIView):
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
-        responses=AdminAuditSerializer(many=True),
+        parameters=[AdminAuditFilterSerializer],
+        responses={
+            200: PaginatedAdminAuditResponseSerializer,
+            400: ErrorEnvelopeSerializer,
+            403: ErrorEnvelopeSerializer,
+        },
+        examples=[
+            OpenApiExample(
+                "Invalid audit filter",
+                value={
+                    "code": "validation_error",
+                    "message": "Invalid request payload.",
+                    "details": [
+                        {"field": "actor_id", "message": "Must be a valid UUID."}
+                    ],
+                },
+                response_only=True,
+                status_codes=["400"],
+            )
+        ],
         description="Return tenant-scoped admin audit activity.",
     )
     def get(self, request):
@@ -578,26 +619,33 @@ class AdminAuditView(APIView):
         except AdminPermissionError as exc:
             return admin_error_response(exc)
 
-        queryset = Activity.objects.filter(tenantid=request.tenant_id).order_by(
-            "-createdat"
-        )
-        activity_type = request.query_params.get("type")
-        request_id = request.query_params.get("request_id")
-        actor_id = request.query_params.get("actor_id")
-        created_from = request.query_params.get("created_from")
-        created_to = request.query_params.get("created_to")
-        if activity_type:
-            queryset = queryset.filter(type=activity_type)
-        if request_id:
-            queryset = queryset.filter(requestid_id=request_id)
-        if actor_id:
-            queryset = queryset.filter(actorid_id=actor_id)
-        if created_from:
-            queryset = queryset.filter(createdat__gte=created_from)
-        if created_to:
-            queryset = queryset.filter(createdat__lte=created_to)
+        filters = AdminAuditFilterSerializer(data=request.query_params)
+        if not filters.is_valid():
+            return validation_error_response(filters.errors)
+        data = filters.validated_data
+        queryset = Activity.objects.filter(tenantid_id=request.tenant_id)
+        field_map = {
+            "type": "type",
+            "request_id": "requestid_id",
+            "actor_id": "actorid_id",
+            "created_from": "createdat__gte",
+            "created_to": "createdat__lte",
+        }
+        for public_field, lookup in field_map.items():
+            if public_field in data:
+                queryset = queryset.filter(**{lookup: data[public_field]})
+        if "entity_id" in data:
+            queryset = queryset.annotate(
+                payload_entity_id=RawSQL(
+                    "JSON_VALUE([Activity].[Payload], '$.entity_id')", []
+                )
+            ).filter(
+                Q(requestid_id=data["entity_id"])
+                | Q(payload_entity_id=str(data["entity_id"]))
+            )
+        queryset = queryset.order_by("-createdat", "-activityid")
 
-        paginator = PageNumberPagination()
+        paginator = StandardPageNumberPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
         serializer = AdminAuditSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
@@ -637,10 +685,8 @@ class AdminDirectoryBaseView(APIView):
         return queryset.order_by(model_field)
 
 
-class AdminDirectoryPagination(PageNumberPagination):
-    page_size = 25
-    page_size_query_param = "page_size"
-    max_page_size = 100
+class AdminDirectoryPagination(StandardPageNumberPagination):
+    pass
 
 
 class AdminUserListCreateView(AdminDirectoryBaseView):
@@ -781,9 +827,19 @@ class AdminMembershipListCreateView(AdminDirectoryBaseView):
         admin_context = self.get_admin_context_or_response(request)
         if isinstance(admin_context, Response):
             return admin_context
-        queryset = Membership.objects.filter(
-            tenantid_id=request.tenant_id
-        ).select_related("userid")
+        queryset = (
+            Membership.objects.filter(tenantid_id=request.tenant_id)
+            .select_related("userid")
+            .prefetch_related(
+                Prefetch(
+                    "membershiprole_set",
+                    queryset=Membershiprole.objects.select_related("roleid").order_by(
+                        "roleid__name"
+                    ),
+                    to_attr="_admin_role_links",
+                )
+            )
+        )
         user_id = request.query_params.get("user_id")
         if user_id:
             try:
@@ -918,7 +974,15 @@ class AdminRoleListCreateView(AdminDirectoryBaseView):
         admin_context = self.get_admin_context_or_response(request)
         if isinstance(admin_context, Response):
             return admin_context
-        queryset = Role.objects.filter(tenantid_id=request.tenant_id)
+        queryset = Role.objects.filter(tenantid_id=request.tenant_id).prefetch_related(
+            Prefetch(
+                "rolepermission_set",
+                queryset=Rolepermission.objects.select_related(
+                    "permissioncode"
+                ).order_by("permissioncode__code"),
+                to_attr="_admin_permission_links",
+            )
+        )
         queryset = self.safe_order(
             request,
             queryset,
@@ -1669,9 +1733,10 @@ class AdminWorkflowBaseView(APIView):
 
     def get_admin_context_or_response(self, request):
         try:
-            return get_admin_context(
+            context = get_admin_context(
                 request, required_permission=ADMIN_ACCESS_PERMISSION
             )
+            return require_admin_permissions(context, ADMIN_WORKFLOWS_PERMISSION)
         except AdminPermissionError as exc:
             return admin_error_response(exc)
 
@@ -1725,15 +1790,22 @@ class AdminWorkflowBaseView(APIView):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    def conflict_response(self, field, message):
+        return Response(
+            {
+                "code": "conflict",
+                "message": message,
+                "details": [{"field": field, "message": message}],
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
     def write_audit(self, request, admin_context, activity_type, payload):
-        Activity.objects.create(
-            activityid=uuid.uuid4(),
-            tenantid_id=request.tenant_id,
-            requestid_id=None,
-            actorid_id=admin_context.user.user_id,
-            type=activity_type,
-            payload=json.dumps(payload, default=str),
-            createdat=timezone.now(),
+        write_admin_audit(
+            request.tenant_id,
+            admin_context.user.user_id,
+            activity_type,
+            payload,
         )
 
     def transition_statuses(self, request, flow, serializer):
@@ -1793,20 +1865,23 @@ class AdminWorkflowListCreateView(AdminWorkflowBaseView):
             return self.admin_validation_response(serializer)
 
         now = timezone.now()
-        with transaction.atomic():
-            flow = Flow.objects.create(
-                flowid=uuid.uuid4(),
-                tenantid_id=request.tenant_id,
-                name=serializer.validated_data["name"],
-                description=serializer.validated_data.get("description") or "",
-                createdat=now,
-            )
-            self.write_audit(
-                request,
-                admin_context,
-                "admin.workflow.created",
-                {"flow_id": flow.flowid, "name": flow.name},
-            )
+        try:
+            with transaction.atomic():
+                flow = Flow.objects.create(
+                    flowid=uuid.uuid4(),
+                    tenantid_id=request.tenant_id,
+                    name=serializer.validated_data["name"],
+                    description=serializer.validated_data.get("description") or "",
+                    createdat=now,
+                )
+                self.write_audit(
+                    request,
+                    admin_context,
+                    "admin.workflow.created",
+                    {"flow_id": flow.flowid, "name": flow.name},
+                )
+        except IntegrityError:
+            return self.conflict_response("name", "A workflow with this name exists.")
         return Response(AdminFlowSerializer(flow).data, status=status.HTTP_201_CREATED)
 
 
@@ -1856,18 +1931,25 @@ class AdminWorkflowDetailView(AdminWorkflowBaseView):
 
         changed_fields = []
         for field in ("name", "description"):
-            if field in serializer.validated_data:
-                setattr(flow, field, serializer.validated_data[field] or "")
+            value = serializer.validated_data.get(field)
+            if field in serializer.validated_data and getattr(flow, field) != (
+                value or ""
+            ):
+                setattr(flow, field, value or "")
                 changed_fields.append(field)
-        with transaction.atomic():
-            if changed_fields:
+        try:
+            with transaction.atomic():
+                if not changed_fields:
+                    return Response(AdminFlowSerializer(flow).data)
                 flow.save(update_fields=changed_fields)
-            self.write_audit(
-                request,
-                admin_context,
-                "admin.workflow.updated",
-                {"flow_id": flow.flowid, "changed_fields": changed_fields},
-            )
+                self.write_audit(
+                    request,
+                    admin_context,
+                    "admin.workflow.updated",
+                    {"flow_id": flow.flowid, "changed_fields": changed_fields},
+                )
+        except IntegrityError:
+            return self.conflict_response("name", "A workflow with this name exists.")
         return Response(AdminFlowSerializer(flow).data)
 
 
@@ -1892,6 +1974,13 @@ class AdminWorkflowStatusCreateView(AdminWorkflowBaseView):
         serializer = AdminStatusWriteSerializer(data=request.data)
         if not serializer.is_valid():
             return self.admin_validation_response(serializer)
+
+        if Status.objects.filter(
+            tenantid_id=request.tenant_id,
+            flowid=flow.flowid,
+            name__iexact=serializer.validated_data["name"],
+        ).exists():
+            return self.conflict_response("name", "A status with this name exists.")
 
         with transaction.atomic():
             status_obj = Status.objects.create(
@@ -1941,14 +2030,19 @@ class AdminWorkflowStatusDetailView(AdminWorkflowBaseView):
         }
         changed_fields = []
         for public_field, model_field in field_map.items():
-            if public_field in serializer.validated_data:
+            if (
+                public_field in serializer.validated_data
+                and getattr(status_obj, model_field)
+                != serializer.validated_data[public_field]
+            ):
                 setattr(
                     status_obj, model_field, serializer.validated_data[public_field]
                 )
                 changed_fields.append(model_field)
         with transaction.atomic():
-            if changed_fields:
-                status_obj.save(update_fields=changed_fields)
+            if not changed_fields:
+                return Response(AdminStatusSerializer(status_obj).data)
+            status_obj.save(update_fields=changed_fields)
             self.write_audit(
                 request,
                 admin_context,
@@ -1990,6 +2084,15 @@ class AdminWorkflowTransitionCreateView(AdminWorkflowBaseView):
         if not serializer.is_valid():
             return self.admin_validation_response(serializer)
         from_status, to_status = self.transition_statuses(request, flow, serializer)
+
+        if Transition.objects.filter(
+            flowid=flow.flowid,
+            fromstatusid=from_status.statusid,
+            tostatusid=to_status.statusid,
+        ).exists():
+            return self.conflict_response(
+                "to_status_id", "This workflow transition already exists."
+            )
 
         with transaction.atomic():
             transition = Transition.objects.create(
@@ -2036,29 +2139,50 @@ class AdminWorkflowTransitionDetailView(AdminWorkflowBaseView):
 
         changed_fields = []
         if "from_status_id" in serializer.validated_data:
-            transition.fromstatusid = self.get_status(
+            from_status = self.get_status(
                 request, flow, serializer.validated_data["from_status_id"]
             )
-            changed_fields.append("fromstatusid")
+            if transition.fromstatusid_id != from_status.statusid:
+                transition.fromstatusid = from_status
+                changed_fields.append("fromstatusid")
         if "to_status_id" in serializer.validated_data:
-            transition.tostatusid = self.get_status(
+            to_status = self.get_status(
                 request, flow, serializer.validated_data["to_status_id"]
             )
-            changed_fields.append("tostatusid")
+            if transition.tostatusid_id != to_status.statusid:
+                transition.tostatusid = to_status
+                changed_fields.append("tostatusid")
         field_map = {
             "guard_roles_json": "guardrolesjson",
             "guard_perms_json": "guardpermsjson",
             "auto_rules": "autorules",
         }
         for public_field, model_field in field_map.items():
-            if public_field in serializer.validated_data:
+            if (
+                public_field in serializer.validated_data
+                and getattr(transition, model_field)
+                != serializer.validated_data[public_field]
+            ):
                 setattr(
                     transition, model_field, serializer.validated_data[public_field]
                 )
                 changed_fields.append(model_field)
         with transaction.atomic():
-            if changed_fields:
-                transition.save(update_fields=changed_fields)
+            if not changed_fields:
+                return Response(AdminTransitionSerializer(transition).data)
+            if (
+                Transition.objects.filter(
+                    flowid=flow.flowid,
+                    fromstatusid=transition.fromstatusid_id,
+                    tostatusid=transition.tostatusid_id,
+                )
+                .exclude(transitionid=transition.transitionid)
+                .exists()
+            ):
+                return self.conflict_response(
+                    "to_status_id", "This workflow transition already exists."
+                )
+            transition.save(update_fields=changed_fields)
             self.write_audit(
                 request,
                 admin_context,
@@ -2150,9 +2274,26 @@ class AttachmentViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         ).order_by("-createdat")
 
 
+@extend_schema_view(
+    list=extend_schema(exclude=True),
+    create=extend_schema(exclude=True),
+)
+class LegacyCommentViewSet(CommentViewSet):
+    pass
+
+
+@extend_schema_view(list=extend_schema(exclude=True))
+class LegacyAttachmentViewSet(AttachmentViewSet):
+    pass
+
+
 class AttachmentInitView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        request=AttachmentInitRequestSerializer,
+        responses=AttachmentInitResponseSerializer,
+    )
     def post(self, request):
         serializer = AttachmentInitRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -2160,13 +2301,25 @@ class AttachmentInitView(APIView):
 
         tenant_id = getattr(request, "tenant_id", None)
         if not tenant_id:
-            return Response({"detail": "Tenant context missing."}, status=400)
+            return Response(
+                {
+                    "code": "tenant_required",
+                    "message": "Tenant context missing.",
+                    "details": [],
+                },
+                status=400,
+            )
 
         try:
             req = Request.objects.get(requestid=data["request_id"], tenantid=tenant_id)
         except Request.DoesNotExist:
             return Response(
-                {"detail": "Request not found for this tenant."}, status=404
+                {
+                    "code": "not_found",
+                    "message": "Request not found for this tenant.",
+                    "details": [],
+                },
+                status=404,
             )
 
         group_id = uuid.uuid4()
@@ -2221,6 +2374,10 @@ class AttachmentInitView(APIView):
 class AttachmentFinalizeView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        request=AttachmentFinalizeRequestSerializer,
+        responses={201: AttachmentFinalizeResponseSerializer},
+    )
     @transaction.atomic
     def post(self, request):
         serializer = AttachmentFinalizeRequestSerializer(data=request.data)
@@ -2229,13 +2386,25 @@ class AttachmentFinalizeView(APIView):
 
         tenant_id = getattr(request, "tenant_id", None)
         if not tenant_id:
-            return Response({"detail": "Tenant context missing."}, status=400)
+            return Response(
+                {
+                    "code": "tenant_required",
+                    "message": "Tenant context missing.",
+                    "details": [],
+                },
+                status=400,
+            )
 
         try:
             req = Request.objects.get(requestid=data["request_id"], tenantid=tenant_id)
         except Request.DoesNotExist:
             return Response(
-                {"detail": "Request not found for this tenant."}, status=404
+                {
+                    "code": "not_found",
+                    "message": "Request not found for this tenant.",
+                    "details": [],
+                },
+                status=404,
             )
 
         now = timezone.now()
@@ -2315,6 +2484,10 @@ class AttachmentFinalizeView(APIView):
 class SearchView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        parameters=[SearchQuerySerializer],
+        responses=SearchResponseSerializer,
+    )
     def get(self, request):
         serializer = SearchQuerySerializer(data=request.query_params)
         if not serializer.is_valid():
@@ -2322,7 +2495,7 @@ class SearchView(APIView):
                 {
                     "code": "validation_error",
                     "message": "Invalid search query.",
-                    "details": serializer.errors,
+                    "details": format_validation_details(serializer.errors),
                 },
                 status=400,
             )

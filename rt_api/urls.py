@@ -42,6 +42,9 @@ from apps.rt.views import (
     CommentViewSet,
     DashboardSummaryView,
     FlowViewSet,
+    LegacyAttachmentViewSet,
+    LegacyCommentViewSet,
+    LegacyDashboardSummaryView,
     ReportRequestExportView,
     ReportSummaryView,
     RequestViewSet,
@@ -74,7 +77,7 @@ urlpatterns = [
     path("api/search/requests", SearchView.as_view(), name="search-requests"),
     path(
         "api/dashboard/summary",
-        DashboardSummaryView.as_view(),
+        LegacyDashboardSummaryView.as_view(),
         name="dashboard-summary",
     ),
     path(
@@ -237,12 +240,16 @@ urlpatterns += router.urls
 
 # nested: /api/requests/<id>/comments y /attachments
 request_comments = CommentViewSet.as_view({"get": "list", "post": "create"})
+request_comments_legacy = LegacyCommentViewSet.as_view(
+    {"get": "list", "post": "create"}
+)
 request_attachments = AttachmentViewSet.as_view({"get": "list"})
+request_attachments_legacy = LegacyAttachmentViewSet.as_view({"get": "list"})
 
 urlpatterns += [
     path(
         "api/requests/<str:request_pk>/comments",
-        request_comments,
+        request_comments_legacy,
         name="request-comments",
     ),
     path(
@@ -252,7 +259,7 @@ urlpatterns += [
     ),
     path(
         "api/requests/<str:request_pk>/attachments",
-        request_attachments,
+        request_attachments_legacy,
         name="request-attachments",
     ),
     path(

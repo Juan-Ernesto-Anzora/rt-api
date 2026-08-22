@@ -3,12 +3,20 @@ from datetime import timedelta
 from pathlib import Path
 
 from corsheaders.defaults import default_headers
+from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "srctpassW12345")
 DEBUG = os.getenv("DEBUG", "1") == "1"
-ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",")
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "insecure-development-only-change-me"
+    else:
+        raise ImproperlyConfigured("DJANGO_SECRET_KEY is required when DEBUG=0.")
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -33,6 +41,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "apps.core.middleware.TenantMiddleware",
+    "apps.core.middleware.ApiErrorEnvelopeMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -60,7 +69,7 @@ ASGI_APPLICATION = "rt_api.asgi.application"
 
 DB_NAME = os.getenv("DB_NAME", "rt")
 DB_USER = os.getenv("DB_USER", "sa")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "YourStrong!Passw0rd")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", "1433"))
 DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
@@ -87,7 +96,7 @@ STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 TIME_ZONE = os.getenv("TIME_ZONE", "UTC")
 USE_TZ = True
 
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = ["http://localhost:5173"]
 CORS_ALLOW_HEADERS = list(default_headers) + [
@@ -100,7 +109,8 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "DEFAULT_PAGINATION_CLASS": "apps.common.pagination.StandardPageNumberPagination",
+    "EXCEPTION_HANDLER": "rt_api.exceptions.api_exception_handler",
     "PAGE_SIZE": 25,
     "URL_FORMAT_OVERRIDE": None,
 }
@@ -110,7 +120,7 @@ REPORT_EXPORT_MAX_ROWS = int(os.getenv("REPORT_EXPORT_MAX_ROWS", "10000"))
 SPECTACULAR_SETTINGS = {
     "TITLE": "Request Tracker API",
     "DESCRIPTION": "Modernized RT API",
-    "VERSION": "0.1.0",
+    "VERSION": "0.2.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "COMPONENT_SPLIT_REQUEST": True,
 }
@@ -121,11 +131,27 @@ SIMPLE_JWT = {
 }
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minio12345")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "rt-attachments")
 MINIO_REGION = os.getenv("MINIO_REGION", "us-east-1")
 MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", "")
+
+if not DEBUG:
+    missing_runtime_secrets = [
+        name
+        for name, value in (
+            ("DB_PASSWORD", DB_PASSWORD),
+            ("MINIO_ACCESS_KEY", MINIO_ACCESS_KEY),
+            ("MINIO_SECRET_KEY", MINIO_SECRET_KEY),
+        )
+        if not value
+    ]
+    if missing_runtime_secrets:
+        raise ImproperlyConfigured(
+            "Required production settings are missing: "
+            + ", ".join(missing_runtime_secrets)
+        )
 
 EMAIL_BACKEND = os.getenv(
     "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"

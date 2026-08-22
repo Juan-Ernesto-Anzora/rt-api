@@ -11,6 +11,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from apps.rt.models import Activity, Comment, Flow, Status, Transition
 from apps.rt.services.admin_permissions import (
     ADMIN_ACCESS_PERMISSION,
+    ADMIN_WORKFLOWS_PERMISSION,
     AdminPermissionError,
 )
 from apps.rt.views import (
@@ -30,6 +31,14 @@ class FakeQuerySet(list):
 
     def order_by(self, *fields):
         self.calls.append(("order_by", fields))
+        return self
+
+
+class EmptyExistsQuerySet:
+    def exists(self):
+        return False
+
+    def exclude(self, **kwargs):
         return self
 
 
@@ -55,7 +64,7 @@ def admin_context():
             email="admin@example.com",
             display_name="Admin User",
         ),
-        permissions=[ADMIN_ACCESS_PERMISSION],
+        permissions=[ADMIN_ACCESS_PERMISSION, ADMIN_WORKFLOWS_PERMISSION],
     )
 
 
@@ -311,6 +320,9 @@ def test_admin_status_create_is_tenant_and_flow_scoped(monkeypatch):
     patch_no_transaction(monkeypatch)
     patch_admin_context(monkeypatch)
     monkeypatch.setattr("apps.rt.views.Flow.objects.get", lambda **kwargs: flow)
+    monkeypatch.setattr(
+        "apps.rt.views.Status.objects.filter", lambda **kwargs: EmptyExistsQuerySet()
+    )
 
     def fake_create_status(**kwargs):
         created.update(kwargs)
@@ -433,6 +445,10 @@ def test_admin_transition_create_validates_statuses_in_workflow(monkeypatch):
         "apps.rt.views.Transition.objects.create", fake_transition_create
     )
     monkeypatch.setattr(
+        "apps.rt.views.Transition.objects.filter",
+        lambda **kwargs: EmptyExistsQuerySet(),
+    )
+    monkeypatch.setattr(
         "apps.rt.views.Activity.objects.create", lambda **kwargs: audits.append(kwargs)
     )
 
@@ -497,6 +513,10 @@ def test_admin_transition_update_saves_and_audits(monkeypatch):
         "apps.rt.views.Transition.objects.get", lambda **kwargs: transition
     )
     monkeypatch.setattr(
+        "apps.rt.views.Transition.objects.filter",
+        lambda **kwargs: EmptyExistsQuerySet(),
+    )
+    monkeypatch.setattr(
         "apps.rt.views.Activity.objects.create", lambda **kwargs: audits.append(kwargs)
     )
     transition.save = lambda update_fields=None: saved.update(
@@ -529,6 +549,23 @@ def test_admin_workflow_permission_denied_returns_403(monkeypatch):
         )
 
     monkeypatch.setattr("apps.rt.views.get_admin_context", fake_get_admin_context)
+
+    response = AdminWorkflowListCreateView.as_view()(
+        authenticated_request("get", "/api/admin/workflows/", uuid.uuid4())
+    )
+
+    assert response.status_code == 403
+    assert response.data["code"] == "permission_denied"
+
+
+def test_admin_read_without_workflow_permission_returns_403(monkeypatch):
+    monkeypatch.setattr(
+        "apps.rt.views.get_admin_context",
+        lambda request, required_permission: SimpleNamespace(
+            user=SimpleNamespace(user_id=uuid.uuid4()),
+            permissions=[ADMIN_ACCESS_PERMISSION],
+        ),
+    )
 
     response = AdminWorkflowListCreateView.as_view()(
         authenticated_request("get", "/api/admin/workflows/", uuid.uuid4())

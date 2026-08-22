@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from django.test import Client
@@ -6,6 +7,7 @@ from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.rt.models import Activity, Tenant, User
+from apps.rt.serializers import AdminAuditSerializer
 from apps.rt.services.admin_permissions import (
     ADMIN_AUDIT_READ_PERMISSION,
     AdminPermissionError,
@@ -24,6 +26,10 @@ class FakeActivityQuerySet(list):
 
     def filter(self, **kwargs):
         self.calls.append(("filter", kwargs))
+        return self
+
+    def annotate(self, **kwargs):
+        self.calls.append(("annotate", kwargs))
         return self
 
 
@@ -103,8 +109,8 @@ def test_admin_audit_endpoint_is_tenant_scoped(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert captured == {"tenantid": tenant.tenantid}
-    assert fake_qs.calls[0] == ("order_by", ("-createdat",))
+    assert captured == {"tenantid_id": tenant.tenantid}
+    assert fake_qs.calls[0] == ("order_by", ("-createdat", "-activityid"))
     assert response.data["results"][0]["activity_id"] == str(activity.activityid)
     assert response.data["results"][0]["actor_id"] == str(activity.actorid_id)
     assert response.data["results"][0]["type"] == "request.created"
@@ -136,13 +142,36 @@ def test_admin_audit_endpoint_applies_safe_filters(monkeypatch):
 
     assert response.status_code == 200
     assert fake_qs.calls == [
-        ("order_by", ("-createdat",)),
         ("filter", {"type": "request.created"}),
-        ("filter", {"requestid_id": str(request_id)}),
-        ("filter", {"actorid_id": str(actor_id)}),
-        ("filter", {"createdat__gte": "2026-06-01T00:00:00Z"}),
-        ("filter", {"createdat__lte": "2026-06-10T23:59:59Z"}),
+        ("filter", {"requestid_id": request_id}),
+        ("filter", {"actorid_id": actor_id}),
+        ("filter", {"createdat__gte": datetime(2026, 6, 1, tzinfo=UTC)}),
+        ("filter", {"createdat__lte": datetime(2026, 6, 10, 23, 59, 59, tzinfo=UTC)}),
+        ("order_by", ("-createdat", "-activityid")),
     ]
+
+
+def test_admin_audit_rejects_invalid_uuid_and_date_range(monkeypatch):
+    monkeypatch.setattr(
+        "apps.rt.views.get_admin_context",
+        lambda request, required_permission: SimpleNamespace(),
+    )
+
+    invalid_uuid = AdminAuditView.as_view()(
+        authenticated_request("/api/admin/audit/?actor_id=not-a-uuid", uuid.uuid4())
+    )
+    invalid_range = AdminAuditView.as_view()(
+        authenticated_request(
+            "/api/admin/audit/?created_from=2026-06-10T00:00:00Z"
+            "&created_to=2026-06-01T00:00:00Z",
+            uuid.uuid4(),
+        )
+    )
+
+    assert invalid_uuid.status_code == 400
+    assert invalid_uuid.data["code"] == "validation_error"
+    assert invalid_range.status_code == 400
+    assert invalid_range.data["code"] == "validation_error"
 
 
 def test_admin_audit_endpoint_denies_missing_audit_permission(monkeypatch):
@@ -165,6 +194,23 @@ def test_admin_audit_endpoint_denies_missing_audit_permission(monkeypatch):
         "message": "You do not have permission to access this admin resource.",
         "details": [],
     }
+
+
+def test_admin_audit_payload_is_backward_compatible_and_safely_parsed():
+    tenant = Tenant(tenantid=uuid.uuid4(), code="ACME", name="ACME")
+    activity = make_activity(tenant)
+    activity.payload = '{"entity_type":"role","entity_id":"%s"}' % uuid.uuid4()
+    data = AdminAuditSerializer(activity).data
+
+    assert data["payload"] == activity.payload
+    assert data["payload_json"]["entity_type"] == "role"
+    assert data["entity_type"] == "role"
+    assert data["entity_id"] == data["payload_json"]["entity_id"]
+
+    activity.payload = "not-json"
+    malformed = AdminAuditSerializer(activity).data
+    assert malformed["payload"] == "not-json"
+    assert malformed["payload_json"] is None
 
 
 def test_openapi_schema_includes_admin_audit_path():

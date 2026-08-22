@@ -3,15 +3,25 @@ import uuid
 import boto3
 from botocore.client import Config
 from django.conf import settings
+from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from rt_api.exceptions import error_envelope
+
+from .serializers import (
+    HealthResponseSerializer,
+    PresignUploadRequestSerializer,
+    PresignUploadResponseSerializer,
+)
+
 
 class HealthView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(responses=HealthResponseSerializer)
     def get(self, request):
         return Response({"status": "ok"}, status=status.HTTP_200_OK)
 
@@ -19,11 +29,27 @@ class HealthView(APIView):
 class PresignUploadView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        request=PresignUploadRequestSerializer,
+        responses=PresignUploadResponseSerializer,
+    )
     def post(self, request):
-        filename = request.data.get("filename")
-        content_type = request.data.get("content_type", "application/octet-stream")
-        if not filename:
-            return Response({"detail": "filename is required"}, status=400)
+        serializer = PresignUploadRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                error_envelope(
+                    "validation_error",
+                    "Invalid request payload.",
+                    [
+                        {"field": field, "message": str(message)}
+                        for field, messages in serializer.errors.items()
+                        for message in messages
+                    ],
+                ),
+                status=400,
+            )
+        filename = serializer.validated_data["filename"]
+        content_type = serializer.validated_data["content_type"]
 
         key = f"uploads/{uuid.uuid4()}-{filename}"
         s3 = boto3.client(
