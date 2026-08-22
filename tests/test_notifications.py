@@ -1,6 +1,7 @@
 import uuid
 from types import SimpleNamespace
 
+import pytest
 from django.utils import timezone
 
 from apps.rt.models import Comment, Flow, Request, Status, Tenant, Transition, User
@@ -307,3 +308,126 @@ def test_send_mail_exception_does_not_break_request_create(monkeypatch):
     perform_create = RequestViewSet.perform_create.__wrapped__
 
     perform_create(view, FakeSerializer())
+
+
+class FirstQuery:
+    def __init__(self, value):
+        self.value = value
+
+    def values_list(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        return self.value
+
+
+def patch_notification_configuration(
+    monkeypatch, tenant_settings=None, template=None, templates_enabled=True
+):
+    monkeypatch.setattr(
+        "apps.rt.services.notification_service.Tenantsetting.objects.filter",
+        lambda **kwargs: tenant_settings or [],
+    )
+    monkeypatch.setattr(
+        "apps.rt.services.notification_service.Featureflag.objects.filter",
+        lambda **kwargs: FirstQuery(templates_enabled),
+    )
+    monkeypatch.setattr(
+        "apps.rt.services.notification_service.Notificationtemplate.objects.filter",
+        lambda **kwargs: FirstQuery(template),
+    )
+
+
+def test_active_tenant_template_uses_safe_context_and_tenant_link(monkeypatch):
+    rt_request = build_request()
+    sent = []
+    tenant_settings = [
+        SimpleNamespace(
+            key="web_base_url", value="https://rt.acme.test", valuetype="url"
+        ),
+        SimpleNamespace(
+            key="email_from", value="notifications@acme.test", valuetype="email"
+        ),
+    ]
+    template = SimpleNamespace(
+        subjecttemplate="Created {human_id}: {title}",
+        bodytemplate=(
+            "ID {request_id}\nURL {request_url}\nRequester {requester_name}\n"
+            "Assignee {assignee_name}\nStatus {status_name}"
+        ),
+    )
+    patch_notification_configuration(
+        monkeypatch, tenant_settings=tenant_settings, template=template
+    )
+    monkeypatch.setattr(
+        "apps.rt.services.notification_service.send_mail",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    notification_service.notify_request_created(rt_request)
+
+    assert sent[0]["subject"] == "Created RT-2026-000111: Notification test"
+    assert sent[0]["from_email"] == "notifications@acme.test"
+    assert f"https://rt.acme.test/requests/{rt_request.requestid}" in sent[0]["message"]
+    assert "Requester Requester" in sent[0]["message"]
+    assert "Status Open" in sent[0]["message"]
+
+
+@pytest.mark.parametrize(
+    ("template", "enabled"),
+    [
+        (None, True),
+        (
+            SimpleNamespace(
+                subjecttemplate="Unsafe {request.__class__}",
+                bodytemplate="Unsafe",
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                subjecttemplate="Custom {human_id}",
+                bodytemplate="Custom {request_url}",
+            ),
+            False,
+        ),
+    ],
+)
+def test_missing_invalid_or_disabled_tenant_template_uses_builtin_fallback(
+    monkeypatch, template, enabled
+):
+    rt_request = build_request()
+    sent = []
+    patch_notification_configuration(
+        monkeypatch, template=template, templates_enabled=enabled
+    )
+    monkeypatch.setattr(
+        "apps.rt.services.notification_service.send_mail",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    notification_service.notify_request_created(rt_request)
+
+    assert sent[0]["subject"] == "Request created: RT-2026-000111"
+    assert "A request was created." in sent[0]["message"]
+
+
+def test_configuration_lookup_failure_does_not_break_notification(monkeypatch):
+    rt_request = build_request()
+    sent = []
+    monkeypatch.setattr(
+        "apps.rt.services.notification_service.Tenantsetting.objects.filter",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+    )
+    monkeypatch.setattr(
+        "apps.rt.services.notification_service.Featureflag.objects.filter",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+    )
+    monkeypatch.setattr(
+        "apps.rt.services.notification_service.send_mail",
+        lambda **kwargs: sent.append(kwargs),
+    )
+
+    notification_service.notify_request_created(rt_request)
+
+    assert sent[0]["subject"] == "Request created: RT-2026-000111"

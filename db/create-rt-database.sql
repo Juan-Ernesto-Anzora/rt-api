@@ -38,6 +38,9 @@ IF OBJECT_ID('dbo.RolePermission','U') IS NOT NULL DROP TABLE dbo.RolePermission
 IF OBJECT_ID('dbo.MembershipRole','U') IS NOT NULL DROP TABLE dbo.MembershipRole;
 IF OBJECT_ID('dbo.SlaTimer','U') IS NOT NULL DROP TABLE dbo.SlaTimer;
 IF OBJECT_ID('dbo.SavedSearch','U') IS NOT NULL DROP TABLE dbo.SavedSearch;
+IF OBJECT_ID('dbo.NotificationTemplate','U') IS NOT NULL DROP TABLE dbo.NotificationTemplate;
+IF OBJECT_ID('dbo.FeatureFlag','U') IS NOT NULL DROP TABLE dbo.FeatureFlag;
+IF OBJECT_ID('dbo.TenantSetting','U') IS NOT NULL DROP TABLE dbo.TenantSetting;
 IF OBJECT_ID('dbo.Activity','U') IS NOT NULL DROP TABLE dbo.Activity;
 IF OBJECT_ID('dbo.Attachment','U') IS NOT NULL DROP TABLE dbo.Attachment;
 IF OBJECT_ID('dbo.Comment','U') IS NOT NULL DROP TABLE dbo.Comment;
@@ -80,6 +83,52 @@ CREATE TABLE dbo.[User] (
   UpdatedAt DATETIME2(3) NULL,
   CONSTRAINT PK_User PRIMARY KEY CLUSTERED (UserId),
   CONSTRAINT UQ_User_Email UNIQUE (Email)
+);
+
+CREATE TABLE dbo.TenantSetting (
+  TenantSettingId UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_TenantSettingId DEFAULT NEWSEQUENTIALID(),
+  TenantId UNIQUEIDENTIFIER NOT NULL,
+  [Key] NVARCHAR(100) NOT NULL,
+  [Value] NVARCHAR(MAX) NULL,
+  ValueType NVARCHAR(30) NOT NULL,
+  IsSensitive BIT NOT NULL CONSTRAINT DF_TenantSetting_IsSensitive DEFAULT(0),
+  UpdatedAt DATETIME2(3) NOT NULL CONSTRAINT DF_TenantSetting_UpdatedAt DEFAULT dbo.utc_now(),
+  UpdatedById UNIQUEIDENTIFIER NULL,
+  CONSTRAINT PK_TenantSetting PRIMARY KEY CLUSTERED (TenantSettingId),
+  CONSTRAINT UQ_TenantSetting_TenantKey UNIQUE (TenantId, [Key]),
+  CONSTRAINT CK_TenantSetting_ValueType CHECK (ValueType IN (N'string', N'integer', N'boolean', N'url', N'timezone', N'email')),
+  CONSTRAINT FK_TenantSetting_Tenant FOREIGN KEY (TenantId) REFERENCES dbo.Tenant(TenantId) ON DELETE NO ACTION,
+  CONSTRAINT FK_TenantSetting_UpdatedBy FOREIGN KEY (UpdatedById) REFERENCES dbo.[User](UserId) ON DELETE NO ACTION
+);
+
+CREATE TABLE dbo.FeatureFlag (
+  FeatureFlagId UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_FeatureFlagId DEFAULT NEWSEQUENTIALID(),
+  TenantId UNIQUEIDENTIFIER NOT NULL,
+  [Key] NVARCHAR(100) NOT NULL,
+  Enabled BIT NOT NULL CONSTRAINT DF_FeatureFlag_Enabled DEFAULT(0),
+  Description NVARCHAR(500) NULL,
+  UpdatedAt DATETIME2(3) NOT NULL CONSTRAINT DF_FeatureFlag_UpdatedAt DEFAULT dbo.utc_now(),
+  UpdatedById UNIQUEIDENTIFIER NULL,
+  CONSTRAINT PK_FeatureFlag PRIMARY KEY CLUSTERED (FeatureFlagId),
+  CONSTRAINT UQ_FeatureFlag_TenantKey UNIQUE (TenantId, [Key]),
+  CONSTRAINT FK_FeatureFlag_Tenant FOREIGN KEY (TenantId) REFERENCES dbo.Tenant(TenantId) ON DELETE NO ACTION,
+  CONSTRAINT FK_FeatureFlag_UpdatedBy FOREIGN KEY (UpdatedById) REFERENCES dbo.[User](UserId) ON DELETE NO ACTION
+);
+
+CREATE TABLE dbo.NotificationTemplate (
+  NotificationTemplateId UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_NotificationTemplateId DEFAULT NEWSEQUENTIALID(),
+  TenantId UNIQUEIDENTIFIER NOT NULL,
+  EventType NVARCHAR(100) NOT NULL,
+  SubjectTemplate NVARCHAR(500) NOT NULL,
+  BodyTemplate NVARCHAR(MAX) NOT NULL,
+  IsActive BIT NOT NULL CONSTRAINT DF_NotificationTemplate_IsActive DEFAULT(1),
+  UpdatedAt DATETIME2(3) NOT NULL CONSTRAINT DF_NotificationTemplate_UpdatedAt DEFAULT dbo.utc_now(),
+  UpdatedById UNIQUEIDENTIFIER NULL,
+  CONSTRAINT PK_NotificationTemplate PRIMARY KEY CLUSTERED (NotificationTemplateId),
+  CONSTRAINT UQ_NotificationTemplate_TenantEvent UNIQUE (TenantId, EventType),
+  CONSTRAINT CK_NotificationTemplate_EventType CHECK (EventType IN (N'request.created', N'request.assigned', N'comment.added', N'request.closed')),
+  CONSTRAINT FK_NotificationTemplate_Tenant FOREIGN KEY (TenantId) REFERENCES dbo.Tenant(TenantId) ON DELETE NO ACTION,
+  CONSTRAINT FK_NotificationTemplate_UpdatedBy FOREIGN KEY (UpdatedById) REFERENCES dbo.[User](UserId) ON DELETE NO ACTION
 );
 
 -- Roles are tenant-scoped root

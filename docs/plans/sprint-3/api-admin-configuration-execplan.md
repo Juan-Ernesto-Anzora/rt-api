@@ -884,6 +884,418 @@ rejected or over-limit export creates no audit event.
 10. Apply the SQL through companion `rt-infra` only after separate approval;
     keep this plan current throughout implementation.
 
+### Milestone 5: Tenant Settings, Feature Flags, and Notification Templates
+
+Day 8 gives authorized tenant administrators one tenant-scoped configuration
+surface for safe application settings, runtime feature flags, and editable
+notification templates. Notification delivery continues to work when no Day 8
+rows exist, a template is inactive, configuration lookup fails, rendering
+fails, or SMTP fails. This milestone is planning-only until reviewed; this
+section does not approve API, model, SQL, seed, or notification changes.
+
+#### Day 8 repository orientation and confirmed behavior
+
+Expected implementation files:
+
+- `apps/rt/models.py`: add unmanaged mappings only after the companion SQL
+  schema is approved; all current RT domain models use `managed = False`.
+- `apps/rt/serializers.py`: add public settings, feature-flag, notification-
+  template, and PATCH serializers with explicit validation and masking.
+- `apps/rt/services/admin_permissions.py`: add constants for the already
+  catalogued `admin.settings`, `tenant.settings.manage`,
+  `featureflags.manage`, and `notifications.manage` permissions.
+- `apps/rt/services/admin_configuration.py`: proposed tenant-scoped read/write
+  service for typed settings, immutable flag/template keys, transactions, and
+  audit behavior.
+- `apps/rt/services/notification_service.py`: resolve tenant overrides safely,
+  render only supported placeholders, and retain the current hardcoded
+  subjects/bodies and process settings as fallback.
+- `apps/rt/services/admin_audit.py`: reuse `write_admin_audit`; do not create
+  fake requests or include sensitive values in audit payloads.
+- `apps/rt/views.py`: add guarded Day 8 APIViews using the established
+  `AdminDirectoryBaseView` permission and error behavior.
+- `rt_api/urls.py`: register the five route shapes before `/api/schema`.
+- `rt_api/settings.py`: retain process-level `WEB_BASE_URL` and
+  `DEFAULT_FROM_EMAIL` as notification fallbacks; do not make database access
+  part of Django settings import.
+- `db/create-rt-database.sql`: add the three tables for fresh databases only
+  because no equivalent structures exist.
+- `db/upgrade-sprint3-admin-settings.sql`: proposed idempotent existing-
+  database table/constraint/index creation and additive ACME seeds.
+- `tests/test_admin_settings.py`: typed settings, masking, RBAC, tenancy,
+  validation, audit, seed, and generated OpenAPI tests.
+- `tests/test_admin_feature_flags.py`: list/PATCH, immutable keys, RBAC,
+  tenancy, audit, seed, and generated OpenAPI tests.
+- `tests/test_admin_notification_templates.py`: list/detail/PATCH,
+  placeholder parsing, fallback rendering, delivery isolation, RBAC, tenancy,
+  audit, seed, and generated OpenAPI tests.
+- `tests/test_notifications.py`: preserve and extend the current domain-event,
+  fallback subject/body, recipient, request-link, and send-failure coverage.
+- `docs/plans/sprint-3/api-admin-configuration-execplan.md`: keep Progress,
+  discoveries, decisions, and outcomes current during implementation.
+
+Repository and SELECT-only live SQL inspection on 2026-08-21 establish:
+
+- No Django model, checked-in DDL table, live SQL Server table, or candidate
+  table columns exist for `TenantSetting`, `FeatureFlag`, or
+  `NotificationTemplate`. Day 8 may add these exact structures without
+  duplicating an existing configuration store.
+- The `rt_sqlserver` MCP tools are not exposed in the current session. The live
+  fallback used `sqlcmd` inside `rt_sqlserver` for metadata and `TOP 20`
+  `SELECT` statements only; no schema or data changed.
+- `admin.read`, `admin.settings`, `tenant.settings.manage`,
+  `featureflags.manage`, and `notifications.manage` already exist in the live
+  permission catalogue and checked-in additive seed. ACME `RT Admin` has all
+  five. ACME `RT Manager` has `admin.read` but none of the four Day 8 specific
+  permissions; do not silently broaden that role in this milestone.
+- `TenantMiddleware` requires `X-Tenant` for these routes and resolves it to
+  `request.tenant_id`. Authorization must still use the established
+  membership/role/permission service rather than trusting the header alone.
+- `Activity.RequestId` and `Activity.ActorId` are nullable in the live schema;
+  existing `write_admin_audit` supports tenant-level configuration events.
+- `rt_api/settings.py` currently defaults `WEB_BASE_URL` to
+  `http://127.0.0.1:5173`, `DEFAULT_FROM_EMAIL` to `rt-api@localhost`, and SMTP
+  to `localhost:1025`.
+- `notification_service.py` has hardcoded implementations for exactly
+  `request.created`, `request.assigned`, `comment.added`, and
+  `request.closed`. Subjects contain the Human ID; bodies contain a headline,
+  Human ID, title, Request ID, and a link derived from `WEB_BASE_URL`.
+- Recipient selection and deduplication already work, and `_send_notification`
+  catches/logs `send_mail` exceptions. Day 8 must not move configuration or
+  rendering errors outside that failure-isolation boundary.
+- There is no static OpenAPI YAML. The Day 8 contract must be defined through
+  serializers and drf-spectacular annotations, then asserted from
+  `GET /api/schema`.
+
+#### Physical schema and existing-database convention
+
+Add three tenant-owned tables because no equivalent structures exist. Use the
+repository convention: unmanaged Django mappings, fresh DDL, and a separate
+idempotent existing-database upgrade. Do not generate Django migrations.
+
+`dbo.TenantSetting`:
+
+```text
+TenantSettingId UNIQUEIDENTIFIER primary key
+TenantId UNIQUEIDENTIFIER not null foreign key to Tenant
+Key NVARCHAR(100) not null
+Value NVARCHAR(MAX) null
+ValueType NVARCHAR(30) not null
+IsSensitive BIT not null default 0
+UpdatedAt DATETIME2(3) not null
+UpdatedById UNIQUEIDENTIFIER null foreign key to User
+unique (TenantId, Key)
+```
+
+`dbo.FeatureFlag`:
+
+```text
+FeatureFlagId UNIQUEIDENTIFIER primary key
+TenantId UNIQUEIDENTIFIER not null foreign key to Tenant
+Key NVARCHAR(100) not null
+Enabled BIT not null
+Description NVARCHAR(500) null
+UpdatedAt DATETIME2(3) not null
+UpdatedById UNIQUEIDENTIFIER null foreign key to User
+unique (TenantId, Key)
+```
+
+`dbo.NotificationTemplate`:
+
+```text
+NotificationTemplateId UNIQUEIDENTIFIER primary key
+TenantId UNIQUEIDENTIFIER not null foreign key to Tenant
+EventType NVARCHAR(100) not null
+SubjectTemplate NVARCHAR(500) not null
+BodyTemplate NVARCHAR(MAX) not null
+IsActive BIT not null default 1
+UpdatedAt DATETIME2(3) not null
+UpdatedById UNIQUEIDENTIFIER null foreign key to User
+unique (TenantId, EventType)
+```
+
+Use `NEWSEQUENTIALID()` defaults for physical IDs and `dbo.utc_now()` for
+update timestamps in fresh DDL. `UpdatedById` is nullable so deployment seeds
+do not invent an actor; API writes always set it to the resolved RT domain user.
+Use `ON DELETE NO ACTION` for tenant and user references. Add tenant-leading
+indexes supporting `(TenantId, Key)` and `(TenantId, EventType)` lookups; the
+unique constraints may satisfy these reads, so do not add duplicate indexes.
+
+Add check constraints for supported `TenantSetting.ValueType` values:
+`string`, `integer`, `boolean`, `url`, `timezone`, and `email`. The service also
+validates the value against its type; SQL stores the normalized textual value
+because one table must represent heterogeneous settings. Keep table/key names
+case-stable in API logic even if the SQL Server collation is case-insensitive.
+
+The upgrade must be safe to rerun and must never update existing setting, flag,
+or template rows. It creates only missing tables/constraints/indexes and uses
+`MERGE ... WHEN NOT MATCHED` or `NOT EXISTS` for ACME defaults. Parse-check it
+with SQL Server before infrastructure applies it. No live schema/data change is
+part of API implementation without separate approval.
+
+#### Additive ACME defaults
+
+Insert these tenant settings only when ACME exists and the same tenant/key is
+missing:
+
+| Key | Value | Value type | Sensitive |
+| --- | --- | --- | --- |
+| `web_base_url` | `http://127.0.0.1:5173` | `url` | false |
+| `default_timezone` | `America/El_Salvador` | `timezone` | false |
+| `default_page_size` | `20` | `integer` | false |
+| `email_from` | `rt-api@localhost` | `email` | false |
+
+Insert these feature flags only when the tenant/key is missing:
+
+```text
+adminConsole=true
+slaEnabled=true
+exportsEnabled=true
+notificationTemplates=true
+```
+
+Insert one active template per ACME event type only when tenant/event type is
+missing:
+
+```text
+request.created
+request.assigned
+comment.added
+request.closed
+```
+
+Seed subject/body text equivalent to the current hardcoded notification
+behavior and include `{request_url}` in every body. Seed reruns never overwrite
+administrator edits, active state, descriptions, types, or sensitive flags.
+
+#### Authorization matrix
+
+Every Day 8 route requires JWT, `X-Tenant`, active-tenant membership, and
+baseline `admin.read`. Apply these additional checks:
+
+| Operation | Additional permission |
+| --- | --- |
+| `GET /api/admin/settings/` | `admin.settings` |
+| `PATCH /api/admin/settings/` | `admin.settings` and `tenant.settings.manage` |
+| `GET /api/admin/feature-flags/` | `featureflags.manage` |
+| `PATCH /api/admin/feature-flags/{key}/` | `featureflags.manage` |
+| `GET /api/admin/notification-templates/` | `notifications.manage` |
+| `GET/PATCH /api/admin/notification-templates/{template_id}/` | `notifications.manage` |
+
+The settings PATCH is the only operation requiring two Day 8 permissions in
+addition to `admin.read`; use `require_admin_permissions` rather than weakening
+the base view. A caller with `tenant.settings.manage` but no `admin.settings`
+cannot enter the settings area. Specific feature/template permissions do not
+grant settings access. Missing permission returns clean `403`; cross-tenant
+identifiers return `404`.
+
+#### Tenant settings API contract
+
+Routes:
+
+- `GET /api/admin/settings/`
+- `PATCH /api/admin/settings/`
+
+Return settings as an ordered collection so type and sensitivity metadata are
+not lost:
+
+```json
+{
+  "settings": [
+    {
+      "setting_id": "00000000-0000-0000-0000-000000000000",
+      "key": "web_base_url",
+      "value": "http://127.0.0.1:5173",
+      "value_type": "url",
+      "is_sensitive": false,
+      "has_value": true,
+      "updated_at": "2026-08-21T12:00:00Z",
+      "updated_by_id": null
+    }
+  ]
+}
+```
+
+Always return `has_value`. Never return a sensitive raw value. For
+`is_sensitive=true`, serialize `value` as `null`; do not return a partial value,
+length, prefix, suffix, or reversible representation. OpenAPI must show this
+behavior.
+
+PATCH accepts an atomic batch:
+
+```json
+{
+  "settings": [
+    {
+      "key": "web_base_url",
+      "value": "http://127.0.0.1:5173",
+      "value_type": "url"
+    }
+  ]
+}
+```
+
+Keys, sensitivity, and row IDs are immutable. Reject duplicate keys within one
+payload, unknown tenant keys, unknown/mismatched value types, and empty batches
+with `400`; no partial update or audit may occur. Normalize values before save:
+
+- `url`: absolute `http` or `https`, hostname required, no credentials,
+  fragments, control characters, or unsupported scheme; remove only redundant
+  trailing slash for `web_base_url`.
+- `timezone`: require an exact IANA zone from Python `zoneinfo`, including
+  `America/El_Salvador`; do not accept arbitrary UTC offsets.
+- `integer`: canonical base-10 text. For `default_page_size`, require 1-100.
+- `boolean`: canonical lowercase `true` or `false`.
+- `email`: validate with DRF/Django email validation and trim whitespace.
+- `string`: accept bounded Unicode text; reject embedded null characters.
+
+`web_base_url` and `email_from` are consumed by notification rendering when
+valid tenant rows exist. Process `settings.WEB_BASE_URL` and
+`settings.DEFAULT_FROM_EMAIL` remain fallback. `default_timezone` and
+`default_page_size` are configuration exposed to the web/admin client in Day 8;
+do not mutate Django's process-global timezone or pagination settings per
+request. Runtime adoption by other APIs is a later, explicit contract change.
+
+#### Feature flag API contract
+
+Routes:
+
+- `GET /api/admin/feature-flags/`
+- `PATCH /api/admin/feature-flags/{key}/`
+
+List all active-tenant rows ordered by key; the bounded seeded catalogue does
+not need pagination in Day 8. Public fields:
+
+```text
+feature_flag_id
+key
+enabled
+description
+updated_at
+updated_by_id
+```
+
+PATCH accepts only `enabled` and optional `description`. The path key and stored
+key are immutable: do not accept `key` or `feature_flag_id` in the body, do not
+implement create/delete/rename, and return `404` for an unknown or cross-tenant
+key. Treat repeated PATCH with no effective change as a successful `200` with
+no audit row. Preserve the exact case-sensitive public keys `adminConsole`,
+`slaEnabled`, `exportsEnabled`, and `notificationTemplates`; tests must prevent
+accidental lowercasing or silent renames.
+
+Day 8 exposes configuration only. It does not gate existing API endpoints on
+these flags, because doing so would silently change Request/SLA/export behavior
+and requires a separate feature-enforcement contract.
+
+#### Notification template API and rendering contract
+
+Routes:
+
+- `GET /api/admin/notification-templates/`
+- `GET /api/admin/notification-templates/{template_id}/`
+- `PATCH /api/admin/notification-templates/{template_id}/`
+
+Lists are tenant-scoped, ordered by event type, and bounded by the supported
+event catalogue. Public fields:
+
+```text
+notification_template_id
+event_type
+subject_template
+body_template
+is_active
+updated_at
+updated_by_id
+```
+
+PATCH accepts only `subject_template`, `body_template`, and `is_active`.
+Template ID and event type are immutable. Reject blank/oversized subjects,
+blank bodies, CR/LF in subjects, malformed braces, format conversion/specifier
+syntax, attribute/index traversal, and placeholders outside this exact set:
+
+```text
+{human_id}
+{title}
+{request_id}
+{request_url}
+{requester_name}
+{assignee_name}
+{comment_author}
+{status_name}
+```
+
+Use `string.Formatter().parse()` or an equivalent structured parser, not regex
+replacement. Permit escaped literal braces `{{` and `}}`. Build a plain string
+context from the current request/comment relationships and render with no
+evaluation, attribute access, indexing, filters, or HTML interpretation.
+
+Runtime resolution order for each notification event:
+
+1. Resolve tenant from the domain object's `tenantid_id`.
+2. Resolve tenant `web_base_url` and `email_from`; use process defaults when a
+   row is absent, invalid, sensitive, or cannot be read.
+3. Resolve the matching active tenant template when the
+   `notificationTemplates` flag is absent or enabled.
+4. Render a valid active template. A missing/inactive row, disabled
+   `notificationTemplates` flag, invalid stored template, lookup exception, or
+   rendering exception uses the current hardcoded subject/body instead.
+5. Send to the existing event-specific recipients with the existing
+   deduplication behavior.
+
+In Day 8, `is_active=false` and `notificationTemplates=false` disable the custom
+override, not the underlying domain notification. This preserves the approved
+notification baseline. A future notification-suppression feature needs an
+explicit separate setting and acceptance criteria.
+
+Keep the four public service entry points and event triggers unchanged:
+`notify_request_created`, `notify_request_assigned`, `notify_comment_added`,
+and `notify_request_closed`. Preserve the current hardcoded subject/body
+builders as constants/functions covered by regression tests. Wrap tenant
+configuration lookup, parsing/rendering, and `send_mail` independently so none
+can break request creation/update, comments, transitions, or close actions.
+
+#### Audit behavior
+
+Every successful effective write sets `UpdatedAt` once, sets `UpdatedById` to
+the resolved RT domain actor, and writes exactly one tenant-level `Activity` in
+the same transaction:
+
+```text
+admin.tenant_settings.updated
+admin.feature_flag.updated
+admin.notification_template.updated
+```
+
+The batch settings event records changed keys and value types only. It never
+records values for sensitive settings and should avoid recording raw values for
+non-sensitive settings as well. Flag audit records key and old/new enabled
+state; template audit records template ID, event type, changed field names, and
+active-state change, not full subject/body content. Rejected and no-op writes
+create no audit event.
+
+#### Day 8 implementation order
+
+1. Create the Day 8 branch from `main` after the Day 7 PR is merged; do not add
+   implementation commits to `feat/api-sla-reports`.
+2. Re-run MCP read-only metadata/row inspection when the server is exposed and
+   reconcile any schema drift before writing DDL.
+3. Add public serializers, errors, examples, media types, and all five route
+   shapes through drf-spectacular first; assert generated schema paths.
+4. Add exact existing permission constants and guarded APIView classes without
+   changing the permission catalogue or role mappings.
+5. Add unmanaged model mappings, fresh DDL, and the idempotent existing-
+   database upgrade. Parse-check SQL without applying it.
+6. Implement the transactional configuration service, typed validation,
+   sensitivity masking, immutable keys/event types, and audit behavior.
+7. Implement read and PATCH endpoints with tenant-scoped querysets and clean
+   `400`/`403`/`404` errors.
+8. Refactor notification rendering behind the existing service entry points,
+   preserving hardcoded/process fallback and domain-action failure isolation.
+9. Add focused positive/negative tests, schema/seed tests, notification
+   fallback tests, and query-count checks.
+10. Run all repository checks and the Postman sequence. Apply the companion SQL
+    through `rt-infra` only after separate approval and keep this plan current.
+
 ## Tests and Verification
 
 Automated verification for Day 1-2 is listed in Milestone 1 Step 8.
@@ -1197,6 +1609,180 @@ zero/negative targets, response greater than resolution, duplicate name,
 invalid/reversed dates, unsupported `format`, and an intentionally over-limit
 export. Confirm clean JSON failures and no SQL or stack-trace disclosure.
 
+Day 8 automated verification:
+
+```bash
+poetry run python manage.py check
+poetry run pytest tests/test_admin_settings.py tests/test_admin_feature_flags.py tests/test_admin_notification_templates.py tests/test_notifications.py -q
+poetry run pytest tests/test_admin_permissions.py tests/test_admin_audit.py -q
+poetry run pytest -q
+poetry run ruff check .
+poetry run black . --check
+poetry run isort . --check --diff
+git diff --check
+```
+
+Required Day 8 tests:
+
+- Generated OpenAPI includes all five route shapes, clean public fields,
+  permission descriptions, settings batch examples, masked sensitive response,
+  feature-flag PATCH, template PATCH, and representative error examples.
+- No JWT returns `401`; missing tenant returns clean `400`; missing baseline or
+  endpoint-specific permission returns `403` for every route family.
+- Settings, flags, and templates list only active-tenant rows. Cross-tenant
+  template IDs and flag keys return `404`; no response or error reveals another
+  tenant's row or value.
+- Settings GET returns non-sensitive values and `value=null` plus `has_value`
+  for sensitive rows. Serializers, audit payloads, logs, and errors never expose
+  a sensitive value.
+- Settings PATCH is atomic and requires `admin.read`, `admin.settings`, and
+  `tenant.settings.manage`. Unknown/duplicate keys, empty batches, type
+  mismatches, malformed URLs/emails, unknown timezones, out-of-range page size,
+  and invalid booleans return `400` with no write or audit.
+- Feature flag list/PATCH requires `featureflags.manage`; keys keep exact case,
+  body rename attempts are rejected, unknown keys return `404`, and no create or
+  delete route exists.
+- Notification template list/detail/PATCH requires `notifications.manage`;
+  event type cannot change. Every approved placeholder and escaped brace works;
+  unknown placeholders, malformed braces, conversions, format specifiers,
+  attribute/index traversal, blank values, and multiline subjects return `400`.
+- Each effective settings batch, flag PATCH, and template PATCH updates the
+  actor/timestamp and creates exactly one expected tenant-level audit event in
+  the same transaction. Rejected and no-op writes create none.
+- Custom templates render correct values for all four events, including
+  requester, assignee, comment author, status, and tenant request URL.
+- Missing/inactive templates, disabled `notificationTemplates`, missing/invalid
+  tenant settings, configuration query exceptions, and rendering exceptions
+  use the existing hardcoded subject/body and process settings.
+- Notification configuration/render/send failures do not break request create,
+  assignment update, comment creation, transition, or close.
+- Existing recipient selection, case-insensitive deduplication, assignment and
+  closed event triggers, Human ID/title/Request ID/link body content, and
+  MailHog defaults remain green.
+- Fresh and upgrade SQL define exactly one of each Day 8 table, required
+  constraints/FKs/uniqueness, four settings, four flags, and four templates.
+  Seed logic is additive only, contains no matching-row update, and SQL Server
+  parse-only validation succeeds.
+- Configuration lookups are bounded and tenant-scoped. Notification delivery
+  performs at most one bounded settings/flag/template fetch per event and does
+  not introduce per-recipient or per-placeholder queries.
+
+Day 8 Postman environment:
+
+```text
+base_url=http://localhost:8000
+tenant_code=ACME
+TOKEN=<RT Admin JWT with all Day 8 permissions>
+settings_read_token=<JWT with admin.read and admin.settings only>
+tenant_settings_token=<JWT with admin.read, admin.settings, tenant.settings.manage>
+feature_flags_token=<JWT with admin.read and featureflags.manage>
+notifications_token=<JWT with admin.read and notifications.manage>
+non_admin_token=<JWT without Day 8 permissions>
+other_tenant_code=<second tenant code>
+notification_template_id=<ACME template UUID returned by list>
+```
+
+Use these headers:
+
+```text
+Authorization: Bearer {{TOKEN}}
+X-Tenant: {{tenant_code}}
+Content-Type: application/json
+```
+
+Tenant settings sequence:
+
+```http
+GET   {{base_url}}/api/admin/settings/
+PATCH {{base_url}}/api/admin/settings/
+```
+
+PATCH body:
+
+```json
+{
+  "settings": [
+    {
+      "key": "web_base_url",
+      "value": "http://127.0.0.1:5173",
+      "value_type": "url"
+    },
+    {
+      "key": "default_timezone",
+      "value": "America/El_Salvador",
+      "value_type": "timezone"
+    },
+    {
+      "key": "default_page_size",
+      "value": "20",
+      "value_type": "integer"
+    },
+    {
+      "key": "email_from",
+      "value": "rt-api@localhost",
+      "value_type": "email"
+    }
+  ]
+}
+```
+
+Feature flag sequence:
+
+```http
+GET   {{base_url}}/api/admin/feature-flags/
+PATCH {{base_url}}/api/admin/feature-flags/notificationTemplates/
+```
+
+PATCH body:
+
+```json
+{
+  "enabled": true,
+  "description": "Enable tenant notification template overrides."
+}
+```
+
+Notification template sequence:
+
+```http
+GET   {{base_url}}/api/admin/notification-templates/
+GET   {{base_url}}/api/admin/notification-templates/{{notification_template_id}}/
+PATCH {{base_url}}/api/admin/notification-templates/{{notification_template_id}}/
+```
+
+PATCH body:
+
+```json
+{
+  "subject_template": "Request updated: {human_id}",
+  "body_template": "Request {human_id}: {title}\nStatus: {status_name}\nLink: {request_url}",
+  "is_active": true
+}
+```
+
+After each effective PATCH, verify audit and generated schema:
+
+```http
+GET {{base_url}}/api/admin/audit/?type=admin.tenant_settings.updated&page=1&page_size=10
+GET {{base_url}}/api/admin/audit/?type=admin.feature_flag.updated&page=1&page_size=10
+GET {{base_url}}/api/admin/audit/?type=admin.notification_template.updated&page=1&page_size=10
+GET {{base_url}}/api/schema
+```
+
+Trigger one request-created, request-assigned, comment-added, and request-
+closed domain action and inspect MailHog. Confirm custom active templates render,
+then deactivate one template and confirm the corresponding hardcoded fallback
+still sends. Confirm email body links use the tenant `web_base_url` and sender
+uses tenant `email_from`.
+
+Repeat representative calls with no JWT, no tenant, each limited token,
+`non_admin_token`, `other_tenant_code`, a cross-tenant template ID, an unknown
+flag key, a body key-rename attempt, a duplicate settings key, invalid URL,
+invalid timezone, invalid email, invalid value type, unknown placeholder,
+malformed braces, attribute traversal, and multiline subject. Expected failures
+are clean `400`/`403`/`404` JSON, create no audit, and never expose raw sensitive
+values, SQL, or stack traces.
+
 ## Acceptance Criteria
 
 Day 1-2 acceptance:
@@ -1256,6 +1842,37 @@ Day 7 acceptance:
 - Generated OpenAPI, focused/full pytest, Django check, Ruff, Black, isort, SQL
   parse-only validation, query-count checks, Postman verification, and
   `git diff --check` pass before merge.
+
+Day 8 acceptance:
+
+- Exactly one unmanaged model/table exists for each tenant setting, feature
+  flag, and notification template structure; fresh and upgrade SQL follow the
+  existing schema convention and do not generate Django migrations.
+- All endpoints require JWT, tenant context, baseline `admin.read`, and the
+  documented specific permission combination. Tenant settings PATCH requires
+  both `admin.settings` and `tenant.settings.manage`.
+- Every queryset and identifier/key lookup begins with active `TenantId`;
+  cross-tenant settings, flags, templates, and sensitive values never leak.
+- Sensitive setting values are never returned, logged, audited, or included in
+  error details. Typed setting validation returns clean `400` responses.
+- Feature-flag keys and template event types cannot be renamed. No create or
+  delete routes silently expand the seeded configuration catalogue.
+- Unknown placeholders and unsafe Python format syntax are rejected. Rendering
+  performs no evaluation, traversal, indexing, HTML interpretation, or dynamic
+  expression execution.
+- The four existing hardcoded notification events remain the fallback when
+  tenant configuration is absent, inactive, disabled, invalid, or unavailable.
+  Configuration/render/send failures never break the originating domain action.
+- Tenant `web_base_url` and `email_from` override process defaults only after
+  successful typed validation; timezone/page-size rows do not mutate global
+  Django behavior in Day 8.
+- ACME settings, flags, and templates are additive demo data and seed reruns
+  never overwrite administrator changes.
+- Every effective write creates exactly one tenant-level audit event in the
+  same transaction; no-op/rejected writes create none and no fake Request.
+- Generated OpenAPI, focused/full pytest, Django check, Ruff, Black, isort, SQL
+  parse-only validation, Postman/MailHog verification, and `git diff --check`
+  pass before merge.
 
 ## Progress
 
@@ -1340,6 +1957,27 @@ Day 7 acceptance:
 - [ ] Apply and SQL Server parse/execute-verify
   `db/upgrade-sprint3-sla-reports.sql` through the companion infrastructure path.
 - [ ] Day 7 Postman sequence completed against the upgraded local database.
+- [x] Day 8 repository guidance and active ExecPlan read in full before planning.
+- [x] Day 8 settings, email/process configuration, notification service,
+  hardcoded templates, permissions, tenant middleware, audit service, DDL,
+  generated OpenAPI path, and notification tests inspected.
+- [x] Day 8 read-only SQL MCP availability checked; tools were not exposed in
+  the session, so SELECT-only container fallback was used and recorded.
+- [x] Live metadata confirmed no equivalent tenant setting, feature flag, or
+  notification template tables/columns exist; required permissions and ACME
+  mappings were inspected without changing schema or data.
+- [x] Day 8 self-contained schema/API/security/fallback/audit/test/OpenAPI/
+  Postman plan prepared for review.
+- [x] Day 8 implementation approved.
+- [x] Day 8 feature branch created from updated `main` after Day 7 merged.
+- [x] Day 8 generated OpenAPI contract implemented through drf-spectacular
+  endpoint annotations and verified at `/api/schema`.
+- [x] Day 8 companion SQL implemented and parse-checked without applying it.
+- [x] Day 8 endpoints and notification fallback integration implemented.
+- [x] Day 8 focused and full automated checks passed: Django check, 171 pytest
+  tests, Ruff, Black, isort, and `git diff --check`.
+- [ ] Day 8 Postman/MailHog sequence passed against an environment where
+  `db/upgrade-sprint3-admin-settings.sql` has been applied.
 
 ## Surprises & Discoveries
 
@@ -1441,6 +2079,29 @@ Day 7 acceptance:
   interpreter. Verification used an ephemeral Python 3.12 Docker runtime with
   the lockfile and Linux ODBC runtime; it did not alter dependency files or the
   live database.
+- 2026-08-21: No repository model/DDL or live SQL table/column provides an
+  equivalent of `TenantSetting`, `FeatureFlag`, or `NotificationTemplate`.
+  Day 8 needs three new unmanaged mappings and physical tables, not extensions
+  to an existing configuration store.
+- 2026-08-21: `rt_sqlserver` MCP tools were not exposed in this session. A
+  SELECT-only `sqlcmd` fallback inside `rt_sqlserver` confirmed schema and role
+  mappings; no write statement was executed.
+- 2026-08-21: All five Day 8 permission codes are already seeded. ACME
+  `RT Admin` has all five, while `RT Manager` has only `admin.read`; adding Day
+  8 access to other roles would be a separate authorization decision.
+- 2026-08-21: Current notification fallback text is code, not Django templates:
+  four subject f-strings and a shared plain-text body builder. The service
+  catches SMTP exceptions but configuration lookup/rendering does not exist yet.
+- 2026-08-21: `default_timezone` and `default_page_size` cannot safely mutate
+  Django process-global settings per tenant. Day 8 exposes them as tenant
+  configuration for clients; runtime adoption needs later endpoint-specific work.
+- 2026-08-21: The Windows Poetry launcher still points to a removed Python
+  interpreter. Verification used the lockfile in an ephemeral Python 3.12
+  container. The first repository-wide isort attempt also showed that isort
+  invokes `git` while scanning `.`; rerunning with Git installed passed.
+- 2026-08-21: SQL Server accepted the full Day 8 companion script under
+  `SET PARSEONLY ON` with no output or error. The script was not applied, so
+  the current development database still requires the companion SQL handoff.
 
 ## Decision Log
 
@@ -1528,6 +2189,40 @@ Day 7 acceptance:
 - 2026-08-17: Keep report authorization outside the admin-area baseline:
   reports require exactly `reports.read` or `reports.export`; SLA administration
   continues to require both `admin.read` and `sla.manage`.
+- 2026-08-21: Require `admin.read` plus `admin.settings` for settings reads and
+  additionally `tenant.settings.manage` for settings writes. Feature flags and
+  notification templates require `admin.read` plus their exact specific
+  permissions without implicitly granting access to other settings families.
+- 2026-08-21: Represent settings as typed textual rows with a strict
+  server-side type vocabulary. Keys, sensitivity, flag keys, and template event
+  types are deployment-controlled and immutable through the Day 8 API.
+- 2026-08-21: Return sensitive setting values as `null` plus `has_value`; never
+  return masked fragments. Audit only keys/types and changed field names, not
+  setting values or full template content.
+- 2026-08-21: Treat inactive/missing/disabled/invalid custom templates as an
+  instruction to use the current hardcoded notification, not to suppress the
+  domain event. Notification suppression is out of scope and needs a separate
+  explicit contract.
+- 2026-08-21: Use Python's structured format parser with an exact placeholder
+  allowlist and prohibit conversion, format specifiers, traversal, and indexing.
+  Preserve escaped literal braces and plain-text output.
+- 2026-08-21: Consume tenant `web_base_url` and `email_from` in notifications,
+  with process settings as fallback. Keep `default_timezone` and
+  `default_page_size` informational for clients in Day 8 to avoid global-state
+  or unrelated endpoint changes.
+- 2026-08-21: Add no role mappings in Day 8. The permission catalogue already
+  contains every required code, and authorization expansion belongs to an
+  explicit tenant/role administration decision.
+- 2026-08-21: Keep Day 8 tables unmanaged and use fresh DDL plus one idempotent
+  upgrade script. Existing ACME rows win: all seed MERGEs are insert-only and
+  have no `WHEN MATCHED` update branch.
+- 2026-08-21: Treat a missing `notificationTemplates` flag as compatible with
+  the built-in/template lookup path, while an explicit false value disables
+  only the database override. Missing, inactive, invalid, or unavailable
+  tenant configuration always falls back to the four existing messages.
+- 2026-08-21: PATCH tenant settings as one atomic list and audit only changed
+  keys/value types. PATCH flags and templates by immutable path identity and
+  audit changed field names, never values or template content.
 
 ## Outcomes & Retrospective
 
@@ -1607,3 +2302,29 @@ Milestone 4 implementation is complete on `feat/api-sla-reports`:
   through the companion infrastructure path before local SLA API/Postman tests.
 - SLA compliance remains explicitly deferred until durable request-policy,
   first-response, resolution, and timer data exists.
+
+Milestone 5 implementation is complete on `codex/feat-api-admin-settings`:
+
+- Added unmanaged tenant-scoped `TenantSetting`, `FeatureFlag`, and
+  `NotificationTemplate` mappings plus canonical fresh DDL and the insert-only
+  `db/upgrade-sprint3-admin-settings.sql` companion script. No Django migration
+  or live database write was used.
+- Added GET/PATCH settings, feature flag list/PATCH, and notification template
+  list/detail/PATCH endpoints with the exact existing Day 8 permissions,
+  immutable identities, clean public fields, typed validation, tenant isolation,
+  and sensitive-value masking.
+- Added transactional services and tenant-level Activity audits for every
+  effective settings, flag, or template write without logging setting values or
+  template content.
+- Added strict safe-format parsing for the eight approved placeholders. Tenant
+  templates run only when active, valid, and not explicitly flag-disabled;
+  every lookup/render failure falls back to the four existing messages.
+- Notification links and sender addresses use validated tenant overrides when
+  present and process settings otherwise. Existing recipients, assignment,
+  comment, close, and non-blocking mail-failure behavior remain intact.
+- Added focused endpoint, serializer, permission, cross-tenant, audit, DDL,
+  generated OpenAPI, and notification regression tests. Full verification passed
+  with 171 tests plus Django check, Ruff, Black, isort, `git diff --check`, and
+  SQL Server parse-only validation.
+- Manual Postman/MailHog verification remains after the companion infrastructure
+  path applies `db/upgrade-sprint3-admin-settings.sql` to the target database.

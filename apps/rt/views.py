@@ -28,13 +28,16 @@ from .models import (
     Activity,
     Attachment,
     Comment,
+    Featureflag,
     Flow,
     Membership,
+    Notificationtemplate,
     Permission,
     Request,
     Role,
     Slapolicy,
     Status,
+    Tenantsetting,
     Transition,
     User,
 )
@@ -69,7 +72,11 @@ from .serializers import (
     AttachmentSerializer,
     CommentSerializer,
     DashboardSummarySerializer,
+    FeatureFlagSerializer,
+    FeatureFlagUpdateSerializer,
     FlowLookupSerializer,
+    NotificationTemplateSerializer,
+    NotificationTemplateUpdateSerializer,
     ReportExportFilterSerializer,
     ReportFilterSerializer,
     ReportSummarySerializer,
@@ -79,10 +86,18 @@ from .serializers import (
     RequestTransitionSerializer,
     SearchQuerySerializer,
     StatusLookupSerializer,
+    TenantSettingsResponseSerializer,
+    TenantSettingsUpdateSerializer,
     TransitionLookupSerializer,
     UserLookupSerializer,
 )
 from .services.admin_audit import write_admin_audit
+from .services.admin_configuration import (
+    tenant_notification_template,
+    update_feature_flag,
+    update_notification_template,
+    update_tenant_settings,
+)
 from .services.admin_directory import (
     AdminDirectoryError,
     assign_permission,
@@ -105,10 +120,14 @@ from .services.admin_permissions import (
     ADMIN_AUDIT_READ_PERMISSION,
     ADMIN_PERMISSIONS_PERMISSION,
     ADMIN_ROLES_PERMISSION,
+    ADMIN_SETTINGS_PERMISSION,
     ADMIN_USERS_PERMISSION,
+    FEATURE_FLAGS_MANAGE_PERMISSION,
+    NOTIFICATIONS_MANAGE_PERMISSION,
     REPORTS_EXPORT_PERMISSION,
     REPORTS_READ_PERMISSION,
     SLA_MANAGE_PERMISSION,
+    TENANT_SETTINGS_MANAGE_PERMISSION,
     AdminPermissionError,
     get_admin_context,
     require_admin_permissions,
@@ -1097,6 +1116,230 @@ class AdminRolePermissionDetailView(AdminDirectoryBaseView):
         except AdminDirectoryError as exc:
             return self.directory_error_response(exc)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminTenantSettingsView(AdminDirectoryBaseView):
+    required_permission = ADMIN_SETTINGS_PERMISSION
+
+    @extend_schema(
+        responses=TenantSettingsResponseSerializer,
+        examples=[
+            OpenApiExample(
+                "Tenant settings",
+                value={
+                    "settings": [
+                        {
+                            "setting_id": "75fae45e-d605-4ca2-8cf7-0b9b90de472d",
+                            "key": "web_base_url",
+                            "value": "http://127.0.0.1:5173",
+                            "value_type": "url",
+                            "is_sensitive": False,
+                            "has_value": True,
+                            "updated_at": "2026-08-21T12:00:00Z",
+                            "updated_by_id": None,
+                        }
+                    ]
+                },
+                response_only=True,
+            )
+        ],
+        description=(
+            "Return current-tenant settings. Sensitive values are masked. "
+            "Requires admin.read and admin.settings."
+        ),
+    )
+    def get(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        queryset = Tenantsetting.objects.filter(tenantid_id=request.tenant_id).order_by(
+            "key"
+        )
+        return Response(TenantSettingsResponseSerializer({"settings": queryset}).data)
+
+    @extend_schema(
+        request=TenantSettingsUpdateSerializer,
+        responses=TenantSettingsResponseSerializer,
+        examples=[
+            OpenApiExample(
+                "Update tenant settings",
+                value={
+                    "settings": [
+                        {
+                            "key": "web_base_url",
+                            "value": "http://127.0.0.1:5173",
+                            "value_type": "url",
+                        }
+                    ]
+                },
+                request_only=True,
+            )
+        ],
+        description=(
+            "Atomically update current-tenant settings. Requires admin.read, "
+            "admin.settings, and tenant.settings.manage."
+        ),
+    )
+    def patch(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            require_admin_permissions(admin_context, TENANT_SETTINGS_MANAGE_PERMISSION)
+        except AdminPermissionError as exc:
+            return admin_error_response(exc)
+        serializer = TenantSettingsUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            tenant_settings = update_tenant_settings(
+                request.tenant_id,
+                admin_context.user.user_id,
+                serializer.validated_data["settings"],
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(
+            TenantSettingsResponseSerializer({"settings": tenant_settings}).data
+        )
+
+
+class AdminFeatureFlagListView(AdminDirectoryBaseView):
+    required_permission = FEATURE_FLAGS_MANAGE_PERMISSION
+
+    @extend_schema(
+        responses=FeatureFlagSerializer(many=True),
+        description=(
+            "List current-tenant feature flags. Requires admin.read and "
+            "featureflags.manage."
+        ),
+    )
+    def get(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        queryset = Featureflag.objects.filter(tenantid_id=request.tenant_id).order_by(
+            "key"
+        )
+        return Response(FeatureFlagSerializer(queryset, many=True).data)
+
+
+class AdminFeatureFlagDetailView(AdminDirectoryBaseView):
+    required_permission = FEATURE_FLAGS_MANAGE_PERMISSION
+
+    @extend_schema(
+        request=FeatureFlagUpdateSerializer,
+        responses=FeatureFlagSerializer,
+        examples=[
+            OpenApiExample(
+                "Disable exports",
+                value={"enabled": False},
+                request_only=True,
+            )
+        ],
+        description=(
+            "Update a current-tenant feature flag without renaming its key. "
+            "Requires admin.read and featureflags.manage."
+        ),
+    )
+    def patch(self, request, key):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = FeatureFlagUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            flag, _changed = update_feature_flag(
+                request.tenant_id,
+                admin_context.user.user_id,
+                key,
+                serializer.validated_data,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(FeatureFlagSerializer(flag).data)
+
+
+class AdminNotificationTemplateListView(AdminDirectoryBaseView):
+    required_permission = NOTIFICATIONS_MANAGE_PERMISSION
+
+    @extend_schema(
+        responses=NotificationTemplateSerializer(many=True),
+        description=(
+            "List current-tenant notification templates. Requires admin.read "
+            "and notifications.manage."
+        ),
+    )
+    def get(self, request):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        queryset = Notificationtemplate.objects.filter(
+            tenantid_id=request.tenant_id
+        ).order_by("eventtype")
+        return Response(NotificationTemplateSerializer(queryset, many=True).data)
+
+
+class AdminNotificationTemplateDetailView(AdminDirectoryBaseView):
+    required_permission = NOTIFICATIONS_MANAGE_PERMISSION
+
+    @extend_schema(
+        responses=NotificationTemplateSerializer,
+        description=(
+            "Return one current-tenant notification template. Requires "
+            "admin.read and notifications.manage."
+        ),
+    )
+    def get(self, request, template_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        try:
+            template = tenant_notification_template(request.tenant_id, template_id)
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(NotificationTemplateSerializer(template).data)
+
+    @extend_schema(
+        request=NotificationTemplateUpdateSerializer,
+        responses=NotificationTemplateSerializer,
+        examples=[
+            OpenApiExample(
+                "Update request-created template",
+                value={
+                    "subject_template": "Request created: {human_id}",
+                    "body_template": (
+                        "A request was created.\nHuman ID: {human_id}\n"
+                        "Title: {title}\nLink: {request_url}"
+                    ),
+                    "is_active": True,
+                },
+                request_only=True,
+            )
+        ],
+        description=(
+            "Update a current-tenant notification template. Event type cannot "
+            "be renamed. Requires admin.read and notifications.manage."
+        ),
+    )
+    def patch(self, request, template_id):
+        admin_context = self.get_admin_context_or_response(request)
+        if isinstance(admin_context, Response):
+            return admin_context
+        serializer = NotificationTemplateUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return self.validation_response(serializer)
+        try:
+            template, _changed = update_notification_template(
+                request.tenant_id,
+                admin_context.user.user_id,
+                template_id,
+                serializer.validated_data,
+            )
+        except AdminDirectoryError as exc:
+            return self.directory_error_response(exc)
+        return Response(NotificationTemplateSerializer(template).data)
 
 
 class AdminSlaPolicyBaseView(AdminDirectoryBaseView):
