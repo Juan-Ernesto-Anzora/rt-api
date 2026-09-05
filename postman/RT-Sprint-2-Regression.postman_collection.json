@@ -1,0 +1,23 @@
+{
+  "info": {
+    "_postman_id": "78581fe7-b2bb-4aba-8451-e6b97e228b1d",
+    "name": "RT Sprint 2 Regression",
+    "description": "Read-only-by-default regression for request lifecycle routes retained through Sprint 3.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{TOKEN}}", "type": "string"}]},
+  "event": [{"listen": "test", "script": {"exec": [
+    "pm.test('No server error', () => pm.expect(pm.response.code).to.be.below(500));",
+    "pm.test('No technical disclosure', () => pm.expect(pm.response.text()).not.to.match(/Traceback|IntegrityError|ProgrammingError|<html/i));"
+  ]}}],
+  "item": [
+    {"name": "Requests List", "request": {"method": "GET", "header": [{"key": "X-Tenant", "value": "{{tenant_code}}"}], "url": "{{base_url}}/api/requests/?page=1&page_size=10"}, "event": [{"listen": "test", "script": {"exec": ["pm.test('Requests 200', () => pm.response.to.have.status(200));", "const r=pm.response.json(); if(r.results.length){pm.environment.set('request_id',r.results[0].request_id);}"]}}]},
+    {"name": "Request Detail", "event": [{"listen": "prerequest", "script": {"exec": ["if (!pm.environment.get('request_id')) pm.execution.skipRequest();"]}}], "request": {"method": "GET", "header": [{"key": "X-Tenant", "value": "{{tenant_code}}"}], "url": "{{base_url}}/api/requests/{{request_id}}/"}},
+    {"name": "Request Bundle", "event": [{"listen": "prerequest", "script": {"exec": ["if (!pm.environment.get('request_id')) pm.execution.skipRequest();"]}}], "request": {"method": "GET", "header": [{"key": "X-Tenant", "value": "{{tenant_code}}"}], "url": "{{base_url}}/api/requests/{{request_id}}/detail/"}},
+    {"name": "Comments", "event": [{"listen": "prerequest", "script": {"exec": ["if (!pm.environment.get('request_id')) pm.execution.skipRequest();"]}}], "request": {"method": "GET", "header": [{"key": "X-Tenant", "value": "{{tenant_code}}"}], "url": "{{base_url}}/api/requests/{{request_id}}/comments/"}},
+    {"name": "Attachments", "event": [{"listen": "prerequest", "script": {"exec": ["if (!pm.environment.get('request_id')) pm.execution.skipRequest();"]}}], "request": {"method": "GET", "header": [{"key": "X-Tenant", "value": "{{tenant_code}}"}], "url": "{{base_url}}/api/requests/{{request_id}}/attachments/"}},
+    {"name": "Available Transitions", "event": [{"listen": "prerequest", "script": {"exec": ["if (!pm.environment.get('request_id')) pm.execution.skipRequest();"]}}], "request": {"method": "GET", "header": [{"key": "X-Tenant", "value": "{{tenant_code}}"}], "url": "{{base_url}}/api/requests/{{request_id}}/available-transitions/"}},
+    {"name": "Dashboard", "request": {"method": "GET", "header": [{"key": "X-Tenant", "value": "{{tenant_code}}"}], "url": "{{base_url}}/api/dashboard/summary/"}},
+    {"name": "Search", "request": {"method": "GET", "header": [{"key": "X-Tenant", "value": "{{tenant_code}}"}], "url": "{{base_url}}/api/search/requests?q=vpn&page=1&page_size=10"}}
+  ]
+}

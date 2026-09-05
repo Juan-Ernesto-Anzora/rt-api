@@ -1762,6 +1762,461 @@ test count, database backup identifier, each applied script/checksum, post-
 upgrade schema query results, Postman collection/environment version, MailHog
 event verification, known deferred items, commit, PR, and proposed `0.2.0` tag.
 
+### Milestone 7: Final API Hardening and Demo Verification
+
+Day 10 is a release gate, not a product milestone. It verifies every Sprint 3
+API family and the complete Sprint 2 request lifecycle against one known build,
+one known database snapshot, one generated OpenAPI document, and one tracked
+Postman collection. Application code may change only when this verification
+finds a reproducible release-blocking defect. Cosmetic refactors, new admin
+areas, new report dimensions, new notification events, and workflow redesign
+remain out of scope.
+
+Implementation must start on `chore/api-sprint3-final-hardening` from updated
+`main` after PR #21 is merged. PR #21 merged as `e1f4201` on 2026-08-22. Do not
+perform Day 10 implementation or commit Postman artifacts on the already-merged
+Day 9 branch.
+
+#### Day 10 inspected baseline
+
+Repository inspection establishes:
+
+- The only Sprint 3 plan is this file. It contains all completed admin,
+  reporting, settings, notification, polish, test, and release decisions.
+- There is no tracked Postman collection or environment JSON. The current
+  Postman contract consists of the milestone request snippets in this ExecPlan
+  and the shorter checklist in `docs/sprint-3-api-verification.md`. A final
+  reproducible collection/environment is therefore a release deliverable, not
+  merely a documentation enhancement.
+- Generated drf-spectacular OpenAPI version `0.2.0` validates with zero errors
+  and zero warnings. It exposes each canonical route once while retaining
+  runtime slash/no-slash compatibility aliases outside the schema.
+- The current OpenAPI includes JWT, tenant context endpoints, every Sprint 3
+  admin route, SLA/report/export routes, and Sprint 2 request, comments,
+  attachments, transitions, close/reopen, search, lookup, and dashboard routes.
+- Day 9 automated verification passed Django check, all 182 tests, Ruff, Black,
+  isort, `git diff --check`, OpenAPI validation, and SQL parse-only checks. Day
+  10 must rerun these from the release candidate rather than inheriting them.
+- `docs/sprint-3-api-verification.md` documents upgrade order and broad smoke
+  areas but does not contain exact request bodies, variable capture, negative
+  tests, reversible-write behavior, cleanup, or collection assertions.
+
+#### Day 10 read-only database validation
+
+The `rt_sqlserver` MCP tools are now exposed, but the default MCP connection
+still times out connecting to `host.docker.internal:1433`; `list_tables` and
+`test_connection` both failed after 15 seconds. `list_connections` reports no
+named connections. This is an operational tooling defect, not evidence of an
+API/database outage, because SELECT-only `sqlcmd` inside the running
+`rt_sqlserver` container succeeds. Day 10 planning used that fallback only; no
+schema or data write was executed.
+
+The live `rt` database now confirms:
+
+- All expected Sprint 2/3 tables exist, including Activity, Flow, Status,
+  Transition, Membership/role join tables, SlaPolicy, TenantSetting,
+  FeatureFlag, and NotificationTemplate.
+- `SlaPolicy` now has Priority, ResponseMinutes, ResolutionMinutes, IsActive,
+  and UpdatedAt. The prior Day 9 SLA release blocker has been resolved in the
+  live database.
+- Activity.RequestId/ActorId nullability matches the unmanaged model and
+  `IX_Activity_TenantCreated` exists alongside `IX_Activity_Request`.
+- The Permission table contains exactly the approved 18-code catalogue. Every
+  one of the 13 route-enforced constants in `admin_permissions.py` matches an
+  exact Permission.Code row; the remaining request/comment/attachment codes are
+  catalogued but intentionally not newly enforced on Sprint 2 routes.
+- ACME RT Admin has one membership and all 18 permissions. Canonical role
+  permission counts are RT Admin 18, RT Manager 9, RT Agent 5, RT Requester 4,
+  and RT Viewer 2.
+- Duplicate tenant code, membership, role, membership-role, role-permission,
+  SLA policy, tenant setting, feature flag, and notification template groups
+  are all zero.
+- Status/flow tenant, request flow/status tenant, transition flow, membership-
+  role tenant, comment/request tenant, attachment/request tenant, and activity/
+  request tenant mismatch counts are all zero.
+- ACME has exactly four typed SLA demo policies, four approved settings, four
+  enabled feature flags, and four active notification templates.
+- Request, comment, attachment, Activity, membership, role, SLA, and
+  configuration indexes expected by checked-in DDL exist. SQL Server FTS uses
+  AUTO change tracking on Request, Comment, and Attachment.
+- Only one tenant exists. Relational consistency is clean, but a one-tenant
+  database cannot demonstrate API-level cross-tenant denial. A disposable
+  second tenant with foreign IDs is required for the full Day 10 gate; it must
+  be created through an approved disposable seed/snapshot path, not by this
+  read-only planning pass or by mutating production data.
+
+#### Day 10 deliverables and exact files
+
+Expected files if verification finds no application defect:
+
+- `postman/RT-Sprint-3.postman_collection.json`: Postman Collection v2.1 with
+  folders, assertions, variable capture, mutation guards, and cleanup/restore
+  notes for all fourteen verification areas below.
+- `postman/RT-Local.postman_environment.json`: secret-free environment template
+  containing empty credential/token values and documented IDs.
+- `docs/sprint-3-api-verification.md`: update with exact collection import/run
+  commands, database snapshot prerequisites, read-only SQL checks, MailHog
+  evidence, and release sign-off table.
+- `docs/sprint-3-demo-script.md`: concise operator sequence using non-destructive
+  or reversible requests for the final demo.
+- `db/verify-sprint3-release.sql`: SELECT-only release evidence query for
+  tables/columns, exact permissions, role counts, duplicate groups, tenant
+  mismatches, seed counts, indexes, and FTS. It must contain no DML, DDL, EXEC,
+  or credential values.
+- `tests/test_postman_contract.py`: validate collection JSON, canonical OpenAPI
+  paths/methods, environment variable references, no embedded secrets, and
+  required status/body assertions without requiring Newman in pytest.
+- `docs/plans/sprint-3/api-admin-configuration-execplan.md`: record execution,
+  blockers, evidence, decisions, and final outcome.
+
+Application modules, serializers, URLs, DDL upgrades, and tests may be edited
+only for a defect reproduced by automated tests, Postman, SQL verification, or
+MailHog. Any such edit must include a focused regression and an ExecPlan entry
+explaining why it blocks release.
+
+#### Postman collection rules
+
+Use canonical OpenAPI paths in the collection. Compatibility aliases receive
+one small regression folder but are not duplicated throughout the collection.
+Every tenant route sends:
+
+```text
+Authorization: Bearer {{TOKEN}}
+X-Tenant: {{tenant_code}}
+Content-Type: application/json (when a body exists)
+```
+
+Authentication routes and health omit `X-Tenant`. Presigned MinIO PUT requests
+use only the returned URL and returned `Content-Type`; they must not inherit JWT,
+Basic, AWS, or collection authorization.
+
+Required environment variables:
+
+```text
+base_url=http://localhost:8000
+tenant_code=ACME
+other_tenant_code=
+username=
+password=
+TOKEN=
+refresh_token=
+admin_user_id=
+request_id=
+foreign_request_id=
+flow_id=
+foreign_flow_id=
+status_id=
+foreign_status_id=
+transition_id=
+requester_id=
+assignee_id=
+actor_id=
+audit_entity_id=
+user_id=
+membership_id=
+role_id=
+permission_code=admin.users
+sla_policy_id=
+feature_flag_key=notificationTemplates
+notification_template_id=
+upload_group_id=
+upload_put_url=
+upload_object_key=
+created_suffix=
+allow_mutation=false
+```
+
+No token, password, SQL password, MinIO secret, presigned URL, or real secret is
+committed as an initial or current value. A collection pre-request script sets a
+unique `created_suffix`. Mutating requests call `pm.execution.skipRequest()`
+unless `allow_mutation=true`. The complete mutation run is allowed only on a
+disposable/restorable verification database. The final demo uses read-only and
+reversible PATCH/transition requests and restores original values.
+
+Every JSON request tests status, `Content-Type`, canonical error envelope on
+failure, expected public snake_case fields, and absence of SQL/traceback/internal
+Django fields. List tests distinguish standard paginated envelopes from the
+documented bounded arrays. CSV tests validate content type, disposition, exact
+header order, and formula-safe output. Variable-producing requests store IDs
+only after assertions pass.
+
+#### Complete verification pass
+
+1. Authentication and tenant context
+
+   - `GET /api/health` returns 200 without JWT or tenant.
+   - `POST /api/auth/jwt/create` with `{ "username": "{{username}}",
+     "password": "{{password}}" }` returns access/refresh and stores TOKEN.
+   - JWT verify and refresh use `/api/auth/jwt/verify` and
+     `/api/auth/jwt/refresh` with their exact token bodies.
+   - A protected route without JWT returns canonical 401; without X-Tenant
+     returns `400 tenant_required`; unknown tenant returns `404
+     tenant_not_found`; malformed JSON returns canonical 400.
+
+2. Admin permission context
+
+   - `GET /api/admin/me/permissions/` returns the ACME tenant ID, RT domain
+     user, sorted roles, sorted permissions, `is_admin=true`, and
+     `can_read_audit=true` for RT Admin.
+   - The response permissions equal the actor's database-effective codes; no
+     JWT-only claim is trusted for tenant authorization.
+   - A non-admin tenant member receives 403 and no role/permission leakage.
+
+3. Audit pagination and filters
+
+   - `GET /api/admin/audit/?page=1&page_size=10` returns count/next/previous/
+     results and preserves raw payload plus parsed/entity fields.
+   - Independently and jointly test `type`, `actor_id`, `request_id`,
+     `entity_id`, `created_from`, and `created_to`.
+   - Invalid UUID/date/range/page/page_size returns canonical 400; foreign-
+     tenant activities never appear; newest-first ordering is stable.
+
+4. Workflow administration
+
+   - List/create/detail/PATCH workflow, status create/PATCH, and transition
+     create/PATCH use only `/api/admin/workflows/...` canonical paths.
+   - Bodies are `{ "name", "description" }`, `{ "name", "category",
+     "is_terminal" }`, and `{ "from_status_id", "to_status_id",
+     "guard_roles_json", "guard_perms_json", "auto_rules" }`.
+   - Duplicate names/pairs and invalid categories/UUIDs return 400/409; no-op
+     PATCH creates no audit; admin.read without admin.workflows returns 403.
+
+5. User, membership, role, and permission administration
+
+   - User list/create/detail/PATCH uses email, display_name, employee_code,
+     avatar_url, is_active, and is_default_tenant public fields.
+   - Membership list/create/detail/PATCH/DELETE uses user_id and
+     is_default_tenant; role assignment POST body is `{ "role_id": "..." }`.
+   - Role list/create/detail/PATCH uses name/description. Permission catalogue
+     is read-only; assignment POST body is `{ "permission_code": "..." }`.
+   - Verify pagination, duplicate conflicts, inactive-user rejection, canonical
+     role rename protection, shared-user conflict, and cross-tenant 404s.
+
+6. Final-admin safeguards
+
+   - On disposable data, attempt to deactivate the actor, delete the final RT
+     Admin membership, remove the actor's final RT Admin role, and remove
+     `admin.read` from the final RT Admin role.
+   - Each returns `409 admin_lockout`, changes no join/user row, and creates no
+     audit activity. Verify a safe non-final assignment removal still succeeds.
+
+7. SLA policy administration
+
+   - List/create/detail/PATCH/deactivate uses canonical SLA paths and body:
+
+     ```json
+     {
+       "name": "Day10 {{created_suffix}}",
+       "priority": "normal",
+       "response_minutes": 120,
+       "resolution_minutes": 1440,
+       "is_active": true
+     }
+     ```
+
+   - Verify four ACME defaults, pagination/filter/sort, positive/order checks,
+     duplicate name, no DELETE route, `sla.manage`, tenant 404, and one audit
+     per effective write.
+
+8. Reports summary
+
+   - `GET /api/reports/summary/` and representative combined q/status/
+     priority/flow/user/date filters return total, category, due, assignment,
+     by_priority, and by_status values scoped to ACME.
+   - Compare selected aggregates with read-only SQL for the same filter. A
+     reports.export-only token cannot read summary.
+
+9. CSV export
+
+   - `GET /api/reports/requests/export/?format=csv` with representative filters
+     requires reports.export and returns the exact eleven columns documented in
+     OpenAPI, safe filename, UTF-8 content type, deterministic order, quoting,
+     empty nullable cells, and formula-prefix neutralization.
+   - Missing permission, invalid format/filter, reversed dates, cross-tenant
+     IDs, and over-limit exports fail without audit; success creates one
+     `report.requests.exported` audit containing normalized filters and count.
+
+10. Tenant settings
+
+    - GET returns four ACME rows and masks any sensitive value as null with
+      `has_value`. PATCH sends an atomic `settings` list of key/value/value_type
+      and restores original values after verification.
+    - Test required `admin.settings` plus `tenant.settings.manage`, duplicate/
+      unknown key, mismatch, invalid URL/email/timezone/integer/boolean, atomic
+      rollback, no-op audit, and absence of values in audit payload.
+
+11. Feature flags
+
+    - GET returns the four exact case-sensitive keys. PATCH only enabled and
+      description for `{{feature_flag_key}}`, records/restores originals, and
+      emits one audit for a real change.
+    - Unknown/wrong-case key, rename/body ID, missing permission, and foreign
+      tenant return 400/403/404 without creating a row.
+
+12. Notification templates
+
+    - GET/detail/PATCH validates the four event types and captures one template
+      ID. A reversible PATCH uses only subject_template, body_template, and
+      is_active, then restores the original template.
+    - Test all supported placeholders, escaped braces, unknown/traversal/
+      conversion/specifier syntax, malformed braces, blank body, multiline
+      subject, event rename, missing permission, and cross-tenant ID.
+
+13. Existing Sprint 2 request lifecycle
+
+    - Lookup flows/statuses/users, create a request with clean `flow_id`,
+      `status_id`, `requester_id`, and optional `assignee_id`, then verify list,
+      detail, detail bundle, activity/activities aliases, dashboard summary,
+      update/assignment, HumanId, timestamps, tenant scoping, and public fields.
+    - Re-run no JWT, no tenant, invalid/cross-tenant lookup IDs, invalid priority,
+      missing required fields, and duplicate/race error-envelope regressions.
+
+14. Search, attachments, comments, transitions, close/reopen, notifications
+
+    - Add a comment with `{ "body": "Day10 {{created_suffix}}" }`; GET comments
+      and both slash/no-slash compatibility aliases remain functional.
+    - Attachment init sends request_id/files. Capture group_id, PUT URL, and
+      object_key. MinIO PUT uses no inherited auth. Finalize sends request_id,
+      group_id, message, and files; verify one comment groups multiple
+      attachments and scan status remains pending.
+    - Search `/api/search/requests` by request title, comment text, and
+      attachment filename with pagination/types/facets; tenant filters and FTS
+      results contain no duplicate requests.
+    - Get available transitions, POST transition, close, reopen, and verify
+      status/activity changes plus invalid/foreign transition behavior.
+    - Inspect MailHog for request.created, request.assigned, comment.added, and
+      request.closed. Verify Human ID, title, request ID, tenant URL, recipient
+      deduplication, active template rendering, inactive/invalid fallback, and
+      SMTP failure isolation.
+
+#### Read-only SQL release evidence
+
+`db/verify-sprint3-release.sql` must report named checks and fail review when:
+
+- any expected table/required column/index/full-text index is missing;
+- an API permission constant has no exact Permission.Code row;
+- the catalogue differs from the approved 18 rows;
+- no active RT Admin membership has all required permissions;
+- duplicate seed key groups or invalid canonical role mappings exist;
+- any tenant mismatch relationship count is nonzero;
+- ACME defaults differ in count/key/type/priority/minutes/active state;
+- Activity request/actor nullability or audit indexes differ from models;
+- a query returns sensitive TenantSetting.Value or any credential.
+
+The SQL file is SELECT-only and outputs counts/metadata, not secret values or
+full notification bodies. It may inspect `sys.tables`, `sys.columns`,
+`sys.indexes`, `sys.fulltext_indexes`, constraints, and bounded aggregates.
+Cross-tenant API leakage remains a Postman/automated test responsibility; SQL
+only proves relational tenant consistency.
+
+For major request list/search/report/audit queries, capture actual execution
+plans or `SET STATISTICS IO/TIME` in a disposable performance session. Existing
+indexes are accepted unless measured scans/latency form a release blocker; Day
+10 must not add speculative indexes merely because separate columns could be
+combined.
+
+#### Automated and collection execution
+
+Run from repository root:
+
+```powershell
+poetry run python manage.py check
+poetry run pytest -q
+poetry run ruff check .
+poetry run black . --check
+poetry run isort . --check --diff
+poetry run python manage.py spectacular --file .agent/tmp/rt-openapi.yaml --validate
+poetry run pytest tests/test_postman_contract.py tests/test_openapi.py tests/test_sprint2_compatibility.py -q
+git diff --check
+```
+
+After importing the environment and entering secrets locally, run Newman if it
+is installed, otherwise run the Postman Collection Runner:
+
+```powershell
+newman run postman/RT-Sprint-3.postman_collection.json `
+  -e postman/RT-Local.postman_environment.json `
+  --env-var username=$env:RT_USERNAME `
+  --env-var password=$env:RT_PASSWORD `
+  --env-var allow_mutation=true `
+  --bail
+```
+
+Run twice against a disposable database restored to the same snapshot: once
+with mutation enabled for complete CRUD/guard verification and once with
+mutation disabled for read-only/demo safety. A Postman request or test failure
+is a release blocker unless the request is explicitly skipped because its
+documented fixture prerequisite is unavailable; required fixture skips are
+themselves blockers for final sign-off.
+
+#### Release-blocking acceptance criteria
+
+Sprint 3 API `0.2.0` cannot be tagged or demonstrated as final unless all are
+true:
+
+1. The release commit is based on merged Day 9 `main`, working tree is clean,
+   CI is green, and version/changelog/OpenAPI all say `0.2.0`.
+2. Django check, full pytest, Ruff, Black, isort, `git diff --check`, Postman
+   contract tests, and drf-spectacular validation pass with zero unexpected
+   warnings/errors.
+3. The tracked Postman collection/environment parses, contains no secret, has
+   no unresolved variable, uses only current OpenAPI methods/paths, and every
+   one of the fourteen folders passes in the required runner mode.
+4. Authentication/tenant failures return canonical envelopes; no expected
+   user mistake returns 500, HTML, SQL, stack trace, KeyError, FieldError,
+   IntegrityError, or raw database constraint text.
+5. Read-only SQL reports all required columns/FKs/checks/indexes/FTS objects,
+   exact permission catalogue, valid RT Admin coverage, canonical role counts,
+   zero duplicate seed groups, and zero relational tenant mismatches.
+6. A disposable second tenant and foreign IDs exist; API reads/writes and
+   report/search/audit filters prove cross-tenant 403/404 behavior with no row,
+   count, name, email, payload, filename, or configuration leakage.
+7. Final-admin/self-lockout attempts return 409, preserve database state, and
+   create no audit; every allowed effective admin write creates exactly one
+   correctly typed tenant audit with no sensitive value.
+8. SLA defaults/admin operations, report aggregates, CSV export, settings,
+   flags, and templates match OpenAPI and read-only SQL evidence.
+9. Sprint 2 create/detail/comment/grouped-upload/search/transition/close/reopen
+   lifecycle passes unchanged, including aliases and notification failure
+   isolation.
+10. MailHog contains all four required event messages with correct recipients,
+    request link, template/fallback behavior, and no duplicate recipient.
+11. The mutating collection runs only on a backed-up/restorable disposable
+    database; original reversible settings/flags/templates are restored and
+    created test records are documented/deactivated or removed where supported.
+12. `docs/sprint-3-api-verification.md`, demo script, known issues, SQL evidence,
+    Postman results, backup/snapshot ID, commit, PR, CI URL, and release decision
+    are complete and reviewed.
+
+Immediate planning blockers are not application defects but prevent final
+sign-off: the MCP default connection is unreachable, no tracked Postman assets
+exist yet, and the current live database has no second tenant for cross-tenant
+runner evidence. The sqlcmd fallback may satisfy database evidence only with an
+explicit reviewer waiver for MCP; Postman assets and a disposable second-tenant
+fixture have no waiver because they are required to reproduce security checks.
+
+#### Day 10 execution order
+
+1. Merge Day 9, create `chore/api-sprint3-final-hardening` from updated main,
+   capture commit/image/database snapshot IDs, and verify services are healthy.
+2. Create the secret-free environment and collection from current OpenAPI;
+   validate every referenced method/path/body/variable/test in pytest.
+3. Add the SELECT-only SQL verification artifact and run it through MCP if the
+   connection is repaired, otherwise through approved sqlcmd with a waiver.
+4. Restore a disposable database, apply all upgrade scripts twice, seed a
+   second tenant/foreign records through the approved test-fixture path, and
+   capture post-upgrade SQL evidence.
+5. Run automated checks and OpenAPI validation before Postman so code/contract
+   failures are separated from environment failures.
+6. Run Postman folders 1-12 for auth/admin/report/configuration, validate audit
+   side effects after each write, and fix only reproduced release blockers.
+7. Run folders 13-14 for full Sprint 2 lifecycle, MinIO PUT, FTS, transitions,
+   close/reopen, MailHog templates/fallback, and SMTP isolation.
+8. Restore reversible values, run the mutation-disabled demo sequence, review
+   database deltas and logs for leaks/500s, and rerun automated checks.
+9. Update verification/demo/known-issues/ExecPlan outcomes with exact evidence,
+   make the explicit go/no-go decision, and only then commit/PR/tag.
+
 ## Tests and Verification
 
 Automated verification for Day 1-2 is listed in Milestone 1 Step 8.
@@ -2371,6 +2826,14 @@ Day 9 acceptance:
   MailHog, schema verification, and release documentation are complete before
   the `0.2.0` release candidate is tagged.
 
+Day 10 acceptance is the twelve-item release-blocking gate defined in Milestone
+7. Unlike prior milestone acceptance, no item may remain pending, waived, or
+inferred from unit tests when the item explicitly requires Postman, MailHog,
+disposable cross-tenant data, or database evidence. Any reproduced application
+defect is fixed with a focused regression; missing tooling/fixtures remain an
+explicit no-go until supplied or, for MCP only, formally waived in favor of the
+read-only sqlcmd evidence path.
+
 ## Progress
 
 - [x] Sprint 3 Day 1-2 planning branch checked out: `feat/api-admin-foundation`.
@@ -2501,6 +2964,32 @@ Day 9 acceptance:
 - [x] Day 9 automated checks and Sprint 2 compatibility tests completed.
 - [ ] Day 9 Postman, MailHog, disposable SQL double-apply, and release sign-off
   completed in the approved environment.
+- [x] Day 10 AGENTS, PLANS, complete Sprint 3 ExecPlan, generated OpenAPI,
+  verification/known-issues/changelog/README, and all tracked Postman assets
+  inspected before planning.
+- [x] Day 10 OpenAPI 0.2.0 regenerated and validated with zero errors/warnings;
+  canonical API path inventory captured.
+- [x] Day 10 `rt_sqlserver` MCP connection/listing attempted read-only; timeout
+  and lack of named connections recorded.
+- [x] Day 10 SELECT-only fallback verified tables/columns, exact permissions,
+  RT Admin/canonical role mappings, duplicates, tenant consistency, indexes,
+  FTS, and non-sensitive seed metadata without modifying data.
+- [x] Day 10 complete fourteen-area Postman/database/demo/release-gate plan
+  prepared with exact paths, bodies, variables, assertions, and blockers.
+- [x] Day 10 implementation/verification approved.
+- [x] Day 9 merge confirmed locally and Day 10 branch created from updated main.
+- [x] Tracked Postman collection/environment, SELECT-only SQL verification,
+  demo script, and contract tests implemented.
+- [x] Disposable `rt_day10` COPY_ONLY clone, BETA workflow, unassigned domain
+  user, and disposable login prepared without modifying original `rt`.
+- [x] Confirmed composite-key removal 500 fixed with focused regressions.
+- [x] Targeted 27 tests and complete 189-test suite passed.
+- [x] Sprint 3 mutation collection passed 69 requests/178 assertions with zero
+  skips/failures; guarded read-only passed 32/92; Sprint 2 passed 8/17.
+- [x] SELECT-only schema/seed/index/FTS checks and MailHog four-event evidence
+  passed; disposable resources cleaned and original database rechecked.
+- [x] All automated, Postman, SQL, MinIO, MailHog, compatibility, cleanup, and
+  release evidence gates passed with an explicit GO decision.
 
 ## Surprises & Discoveries
 
@@ -2667,6 +3156,46 @@ Day 9 acceptance:
 - 2026-08-22: All five Sprint 3 upgrade scripts pass SQL Server parse-only
   validation. No script was applied, so the live legacy SLA blocker remains
   until the infrastructure release step.
+- 2026-08-22: By Day 10, the live SLA upgrade and Day 9 Activity index have been
+  applied. SlaPolicy has all typed columns and four defaults, resolving the
+  prior schema blocker; every expected Sprint 3 table/index checked is present.
+- 2026-08-22: `rt_sqlserver` MCP tools became callable, but their default
+  connection still times out at `host.docker.internal:1433`, and no named
+  connection exists. Direct SELECT-only sqlcmd against the running container
+  succeeds, so MCP connectivity remains a tooling/evidence issue rather than a
+  database availability issue.
+- 2026-08-22: No Postman JSON assets are tracked despite multiple milestone
+  snippets and a verification checklist. Day 10 cannot claim reproducible
+  collection coverage until a collection and secret-free environment are
+  generated and contract-tested.
+- 2026-08-22: Live duplicate groups and all tested tenant relationship mismatch
+  counts are zero. However, TenantCount is one, so live data cannot prove API-
+  level cross-tenant isolation; a disposable second tenant is mandatory.
+- 2026-08-22: Current Permission.Code contains the approved 18 rows, all 13
+  route-enforced constants resolve exactly, RT Admin has all 18, and canonical
+  role counts remain 18/9/5/4/2.
+- 2026-08-22: Current major indexes include Activity tenant/date, request
+  tenant/status/assignee/updated, comment request/created, attachment request,
+  SLA tenant/active/priority, and tenant-leading unique configuration indexes.
+  FTS AUTO tracking is active for Request, Comment, and Attachment.
+- 2026-08-23: The mutation collection reproduced a real SQL Server defect:
+  Django instance deletion for CompositePrimaryKey join models generated a
+  tuple-IN predicate, which SQL Server rejects near the comma. Assignment worked
+  but role-permission removal returned a masked 500 and rolled back.
+- 2026-08-23: Replacing only MembershipRole/RolePermission instance deletes
+  with filtered QuerySet `_raw_delete` preserves transactions and lockout checks
+  while generating SQL Server-compatible predicates. Both removals return 204;
+  final RT Admin removal still returns 409.
+- 2026-08-23: A COPY_ONLY clone allowed complete mutation and cross-tenant
+  verification without touching original `rt`. The first MinIO attempt exposed
+  a runner endpoint issue (`host.docker.internal` from host Newman), resolved by
+  signing disposable URLs for localhost; no application change was needed.
+- 2026-08-23: Final Sprint 3 mutation evidence is 69 requests and 178 assertions
+  with zero skips/failures. Sprint 2 regression is 8/17. MailHog contains all
+  four event classes, including the customized comment template.
+- 2026-08-23: Post-run SQL on the disposable clone retained zero duplicate
+  groups and zero tenant mismatches. Cleanup removed the clone/container/backup/
+  image; original `rt` has one tenant, four SLA defaults, and no Day10 rows.
 
 ## Decision Log
 
@@ -2822,6 +3351,30 @@ Day 9 acceptance:
   fields while preserving raw `payload`. Infer entity metadata centrally from
   existing event payload IDs so all Sprint 3 writers gain a consistent contract
   without rewriting their public event-specific keys.
+- 2026-08-22: Day 10 adds no product behavior by default. The primary artifacts
+  are Postman/environment, SELECT-only SQL evidence, demo/verification docs, and
+  contract tests; application edits require a reproduced release blocker.
+- 2026-08-22: Treat the generated OpenAPI document as the canonical method/path
+  source for Postman. Keep compatibility aliases in one regression folder, not
+  duplicated across the main runner.
+- 2026-08-22: Separate mutating verification from demo safety with
+  `allow_mutation`. Full CRUD/lockout testing requires a disposable restorable
+  database; the final demo is read-only or reversible and restores values.
+- 2026-08-22: MCP timeout may receive a documented reviewer waiver when the
+  identical SELECT-only SQL artifact runs through approved sqlcmd. There is no
+  waiver for missing Postman assets or missing second-tenant cross-tenant tests.
+- 2026-08-22: Existing indexes are release-acceptable unless actual execution
+  plans or measured IO/latency demonstrate a blocker. Do not add speculative
+  indexes during final hardening.
+- 2026-08-23: Use filtered `_raw_delete` only for the two unmanaged composite-
+  key join tables. Keep ordinary instance/queryset deletion behavior elsewhere;
+  this is a backend-compatibility fix, not a general deletion abstraction.
+- 2026-08-23: Generate disposable JWT login credentials only in the cloned
+  database and pass them to Newman process memory. Never store them in tracked
+  Postman environment files or final reports.
+- 2026-08-23: Approve the sqlcmd evidence waiver for the still-unreachable MCP
+  because the tracked SELECT-only script ran against both original and cloned
+  databases and all other release gates passed.
 
 ## Outcomes & Retrospective
 
@@ -2984,3 +3537,63 @@ manual release-environment verification pending:
 - Remaining release work is operational: back up the target database, apply the
   ordered upgrades (including the required SLA upgrade), double-apply in a
   disposable database, run Postman/MailHog, capture evidence, and tag `0.2.0`.
+
+Milestone 7 planning was completed and approved before execution:
+
+- Regenerated and validated OpenAPI 0.2.0, inventoried every canonical API path,
+  and confirmed there is no tracked Postman collection/environment to execute.
+- Attempted the requested read-only MCP validation; recorded the connection
+  timeout, then completed bounded SELECT-only fallback inspection with no data
+  or schema write.
+- Confirmed the previously blocked SLA schema is upgraded, all expected Sprint
+  3 tables/defaults/indexes are present, exact permissions/RT Admin/canonical
+  role mappings are valid, duplicate groups are zero, and relational tenant
+  mismatch checks are zero.
+- Identified one-tenant live data, missing Postman artifacts, and unreachable MCP
+  as evidence gaps. Only MCP can be waived in favor of approved read-only
+  sqlcmd; cross-tenant fixtures and a reproducible collection are mandatory.
+- Defined a fourteen-folder verification pass spanning auth/tenant, permissions,
+  audit, all admin domains and safeguards, SLA/reports/CSV, settings/flags/
+  templates, and the complete Sprint 2 lifecycle with MinIO, FTS, transitions,
+  close/reopen, MailHog, template fallback, and SMTP isolation.
+- Defined exact environment variables, canonical URLs, request bodies,
+  assertions, mutation guard, cleanup/restore behavior, SQL evidence, automated
+  commands, demo flow, and twelve no-waiver release-blocking acceptance gates.
+- No Postman file, application code, schema, seed, credential, or live data was
+  changed during Day 10 planning.
+
+Milestone 7 implementation and verification are complete on
+`chore/api-sprint3-final-hardening`:
+
+- Added tracked secret-free Sprint 3 and Sprint 2 Postman collections, an empty
+  local environment template, collection/OpenAPI contract tests, and a
+  SELECT-only SQL release verification artifact.
+- Added final demo, verification, known-issues, and release-readiness documents
+  with exact commands, evidence, limitations, cleanup, and commit guidance.
+- Ran guarded read-only Sprint 3 (32 requests/92 assertions) and Sprint 2
+  regression (8/17) against the normal API with zero failures.
+- Created a COPY_ONLY `rt_day10` clone plus BETA foreign workflow/unassigned-user
+  fixtures and disposable-only password. The original database was never a
+  mutation target.
+- The first full mutation run confirmed a release blocker in composite-key
+  permission deletion. Added a focused SQL Server-safe fix for both membership-
+  role and role-permission removal plus two regressions.
+- Restored the clone and reran the complete collection: 69/69 requests and 178
+  assertions passed with zero skips/failures, including login, cross-tenant 404,
+  final-admin 409, all admin families, SLA/report/CSV, configuration/templates,
+  request lifecycle, comments, MinIO PUT/finalize, transition, close, reopen,
+  and notification triggers.
+- MailHog showed request.created, request.assigned, custom comment.added, and
+  request.closed events; recipient headers were unique and required request/link
+  markers were present in baseline messages.
+- SELECT-only verification confirmed expected 18 tables, 11 SLA columns, exact
+  18 permissions, role counts 18/9/5/4/2, zero duplicates/mismatches, 15 major
+  indexes, three AUTO FTS indexes, and expected configuration seed metadata.
+- Targeted 27 tests and complete 189-test pytest suite pass. Django check, Ruff,
+  Black, isort, OpenAPI 0.2.0 validation, secret scan, and `git diff --check`
+  pass.
+- Removed the disposable API/database/backup/image. Final SELECT-only checks
+  prove original `rt` has no Day10 flow, role, user, or request and retains four
+  SLA defaults.
+- Release decision: GO for merge and release-candidate CI. Remaining limitations
+  are documented and are not release-blocking for API 0.2.0.
