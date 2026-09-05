@@ -158,6 +158,45 @@ def test_final_admin_removal_is_blocked(monkeypatch):
     assert caught.value.status_code == 409
 
 
+def test_role_removal_uses_sql_server_safe_composite_delete(monkeypatch):
+    tenant_id = uuid.uuid4()
+    membership = make_membership(tenant_id, make_user())
+    role = make_role(tenant_id, name="RT Agent")
+    link = SimpleNamespace()
+    deleted = []
+    audits = []
+    monkeypatch.setattr(admin_directory.transaction, "atomic", lambda: nullcontext())
+    monkeypatch.setattr(
+        admin_directory, "tenant_membership", lambda *args, **kwargs: membership
+    )
+    monkeypatch.setattr(admin_directory, "tenant_role", lambda *args, **kwargs: role)
+    monkeypatch.setattr(
+        "apps.rt.services.admin_directory.Membershiprole.objects.select_for_update",
+        lambda: SimpleNamespace(
+            filter=lambda **kwargs: SimpleNamespace(first=lambda: link)
+        ),
+    )
+    monkeypatch.setattr(
+        admin_directory,
+        "delete_composite_link",
+        lambda model, **filters: deleted.append((model, filters)),
+    )
+    monkeypatch.setattr(
+        admin_directory, "write_admin_audit", lambda *args: audits.append(args)
+    )
+
+    admin_directory.remove_role(
+        tenant_id, uuid.uuid4(), membership.membershipid, role.roleid
+    )
+
+    assert deleted[0][0] is Membershiprole
+    assert deleted[0][1] == {
+        "membershipid_id": membership.membershipid,
+        "roleid_id": role.roleid,
+    }
+    assert audits[0][2] == "admin.membership.role_removed"
+
+
 def test_membership_role_model_uses_composite_identity():
     field_names = {field.name for field in Membershiprole._meta.fields}
 

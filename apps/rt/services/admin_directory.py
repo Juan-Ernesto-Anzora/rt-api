@@ -103,6 +103,11 @@ def role_permissions(role_id):
     return Permission.objects.filter(rolepermission__roleid_id=role_id).order_by("code")
 
 
+def delete_composite_link(model, **filters):
+    queryset = model.objects.filter(**filters)
+    return queryset._raw_delete(queryset.db)
+
+
 def membership_is_effective_admin(
     membership,
     excluded_role_id=None,
@@ -469,7 +474,11 @@ def remove_role(tenant_id, actor_id, membership_id, role_id):
                 actor_id,
                 excluded_role=(membership.membershipid, role.roleid),
             )
-        link.delete()
+        delete_composite_link(
+            Membershiprole,
+            membershipid_id=membership.membershipid,
+            roleid_id=role.roleid,
+        )
         write_admin_audit(
             tenant_id,
             actor_id,
@@ -536,7 +545,11 @@ def remove_permission(tenant_id, actor_id, role_id, permission_code):
                 actor_id,
                 excluded_permission=(role.roleid, permission_code),
             )
-        link.delete()
+        delete_composite_link(
+            Rolepermission,
+            roleid_id=role.roleid,
+            permissioncode_id=permission_code,
+        )
         write_admin_audit(
             tenant_id,
             actor_id,

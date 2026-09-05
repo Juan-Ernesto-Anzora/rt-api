@@ -15,3 +15,11 @@
   the standard pagination envelope.
 - Sprint 2 request/comment/upload permissions are not retrofitted during Day 9;
   existing JWT and tenant enforcement remains unchanged.
+- The `rt_sqlserver` MCP default connection times out at
+  `host.docker.internal:1433`; approved SELECT-only sqlcmd is the current
+  evidence fallback.
+- The current local database contains only ACME. A disposable second tenant is
+  required before final cross-tenant Postman sign-off.
+- Full mutating Postman verification must run against a disposable/restorable
+  database. The default tracked environment intentionally sets
+  `allow_mutation=false`.

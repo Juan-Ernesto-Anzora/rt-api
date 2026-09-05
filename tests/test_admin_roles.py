@@ -8,7 +8,7 @@ from django.test import Client
 from django.urls import resolve
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from apps.rt.models import Role
+from apps.rt.models import Role, Rolepermission
 from apps.rt.services import admin_directory
 from apps.rt.services.admin_directory import AdminDirectoryError
 from apps.rt.services.admin_permissions import (
@@ -184,6 +184,41 @@ def test_unknown_permission_returns_400_not_500(monkeypatch):
     assert caught.value.code == "validation_error"
     assert caught.value.status_code == 400
     assert caught.value.details[0]["field"] == "permission_code"
+
+
+def test_permission_removal_uses_sql_server_safe_composite_delete(monkeypatch):
+    tenant_id = uuid.uuid4()
+    role = Role(roleid=uuid.uuid4(), tenantid_id=tenant_id, name="Day10 Role")
+    link = SimpleNamespace()
+    deleted = []
+    audits = []
+    monkeypatch.setattr(admin_directory.transaction, "atomic", lambda: nullcontext())
+    monkeypatch.setattr(admin_directory, "tenant_role", lambda *args, **kwargs: role)
+    monkeypatch.setattr(
+        "apps.rt.services.admin_directory.Rolepermission.objects.select_for_update",
+        lambda: SimpleNamespace(
+            filter=lambda **kwargs: SimpleNamespace(first=lambda: link)
+        ),
+    )
+    monkeypatch.setattr(
+        admin_directory,
+        "delete_composite_link",
+        lambda model, **filters: deleted.append((model, filters)),
+    )
+    monkeypatch.setattr(
+        admin_directory, "write_admin_audit", lambda *args: audits.append(args)
+    )
+
+    admin_directory.remove_permission(
+        tenant_id, uuid.uuid4(), role.roleid, "admin.users"
+    )
+
+    assert deleted[0][0] is Rolepermission
+    assert deleted[0][1] == {
+        "roleid_id": role.roleid,
+        "permissioncode_id": "admin.users",
+    }
+    assert audits[0][2] == "admin.role.permission_removed"
 
 
 def test_seed_sql_is_additive_and_contains_exact_catalogue_and_roles():
