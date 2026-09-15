@@ -1,8 +1,7 @@
 # .codex/config.toml.example
-# Copy to .codex/config.toml if you want repo-local Codex defaults.
-# Keep approvals and sandboxing conservative unless you intentionally loosen them.
-# Recommended project style:
-# - Plan first for multi-file features.
-# - Ask before destructive operations.
-# - Run repo-specific checks before suggesting a commit.
-# - Keep changes small and PR-focused.
+# Optional project defaults. Merge these top-level keys into an existing config;
+# never replace MCP, auth, approval, sandbox, profile, or managed settings.
+model = "gpt-6-astra"
+# Preserve a different supported effort already chosen for the user's workload.
+model_reasoning_effort = "medium"
+# Configuration is a default, not evidence of the active task's model.

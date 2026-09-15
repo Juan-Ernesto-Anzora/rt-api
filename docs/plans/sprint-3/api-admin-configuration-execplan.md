@@ -1,5 +1,18 @@
 # Sprint 3 API ExecPlan - Admin and Configuration APIs
 
+## Baseline reconciliation (2026-09-07)
+
+The user reports Sprint 3 Day 10 hardening and infrastructure SQL validation
+complete. Milestone 7 outcomes and `docs/sprint-3-api-verification.md` record
+189 tests and Postman/SQL evidence. API PR #22 is merged at `6ce40df`.
+Earlier unchecked boxes, "in progress", and pre-merge notes below are historical
+and do not authorize rerunning Sprint 2/3. Preserve the evidence rather than
+blanket-marking old gates passed. Current production deployment, release tagging,
+and SQL double-application records are unverified by the Codex adoption task.
+The selected adoption plan is
+`docs/plans/sprint-4/codex-astra-adoption-execplan.md`; its organizational Sprint 4
+label does not authorize product implementation.
+
 ## Purpose
 
 Sprint 3 adds tenant-scoped admin APIs for configuration data that currently must be managed through seed scripts, SQL, or Django admin. After this work, authorized tenant admins can inspect their effective permissions, review audit activity, and eventually manage workflows, statuses, transitions, users, memberships, roles, and permissions through API endpoints that the web admin UI can consume.
