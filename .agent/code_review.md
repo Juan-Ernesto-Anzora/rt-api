@@ -17,4 +17,4 @@ Use this checklist when asking Codex to review a branch, PR diff, uncommitted ch
 
 ## Codex review prompt
 
-Review this branch against `main`. Read `AGENTS.md`, `.agent/PLANS.md`, and the active ExecPlan in `docs/plans` first. Focus on correctness, tenant isolation, public API naming, test coverage, and regressions. Do not make code changes yet. Return prioritized findings with file paths and suggested fixes.
+Review this branch against the verified current main base. Read `AGENTS.md`, applicable nested instructions, `.agent/PLANS.md`, and the explicitly selected active plan first. Use `docs/codex-prompts.md` to identify that plan. Do not edit. Return prioritized findings with file/line evidence, suggested fixes, and missing verification. Separate historical reported results from fresh checks and mocks from live tests. Missing coverage/type runners and skipped CI are not passes. Do not reopen completed sprints from historical checkboxes. Preserve all existing quality gates and required reviewer approvals.

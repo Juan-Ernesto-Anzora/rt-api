@@ -15,6 +15,9 @@ An ExecPlan is a self-contained implementation plan that a coding agent or a new
 7. For API or UI contract changes, update OpenAPI or design tokens before implementation.
 8. Run the repo checks listed in `AGENTS.md` before suggesting a commit or PR.
 9. For auth, tenancy, uploads, search SQL, database, permissions, or workflows, include negative tests.
+10. Select and name the active plan explicitly. Historical unchecked boxes are evidence to reconcile, not automatic authorization. Record user-reported completion separately from freshly verified deployment state.
+11. During iteration run focused checks; at the commit/PR gate run all required available checks from AGENTS. Justify reruns by changes/failures. Keep missing coverage/type/live tooling visible as blocked or unverified, never silently waived.
+12. Preserve higher-priority instructions, managed controls, and explicit user scope. Finish authorized work with routine reversible choices; if blocked, name the instruction file/rule or real permission barrier and continue independent work.
 
 ## Where plans live
 

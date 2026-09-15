@@ -6,7 +6,7 @@
 poetry install
 cp .env.example .env
 ## Replace every replace-with-... value using local softdev-infra credentials.
-poetry run python manage.py migrate   # (no models yet; this sets up Django tables only)
+poetry run python manage.py migrate   # Django-managed tables only; RT domain models are unmanaged
 poetry run python manage.py createsuperuser
 poetry run python manage.py runserver 0.0.0.0:8000
 ```
@@ -35,6 +35,21 @@ missing; administrator changes are not overwritten.
 - Sprint 3 verification and database instructions:
   `docs/sprint-3-api-verification.md`.
 - Known release follow-ups: `docs/sprint-3-known-issues.md`.
+
+## Codex development
+
+Read `AGENTS.md` and `.agent/PLANS.md`, then select an explicit plan using
+`docs/codex-prompts.md`. The adoption plan is
+`docs/plans/sprint-4/codex-astra-adoption-execplan.md`; Sprint 4 here is only a
+workflow label. `.codex/config.toml.example` supplies optional GPT-6 Astra
+defaults without changing the RT application or requiring an OpenAI API key.
+
+OpenAPI comes from drf-spectacular at `/api/schema`; there is no checked-in
+static YAML. Infrastructure startup is managed separately: this API checkout
+has no Compose file or seed.sh. See AGENTS section 11 for the full check gate,
+and `docs/sprint-3-api-verification.md` for live-service checks. Focused checks
+run during iteration; full required checks run at the PR gate. Missing tooling
+and CI path-filter skips must be reported, not counted as passing verification.
 
 ## Sprint 1 Smoke Test
 1. Start API
