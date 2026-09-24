@@ -20,7 +20,7 @@ from drf_spectacular.utils import (
 )
 from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -91,6 +91,8 @@ from .serializers import (
     ReportSummarySerializer,
     RequestCloseReopenSerializer,
     RequestDetailSerializer,
+    RequestListFilterSerializer,
+    RequestListSerializer,
     RequestSerializer,
     RequestTransitionSerializer,
     SearchQuerySerializer,
@@ -179,18 +181,84 @@ class BaseTenantViewSet(viewsets.ModelViewSet):
         return qs.none()
 
 
+@extend_schema_view(
+    list=extend_schema(
+        description=(
+            "Tenant-scoped requests. mine=true selects assigned-to-me; mine=false "
+            "selects other assignees and unassigned. requested_by_me=true selects "
+            "my requests. closed=true selects closed-category or terminal statuses; "
+            "closed=false excludes both. Filters combine before pagination. "
+            "Results include nullable assignee and compact status, requester, "
+            "assignee, and flow summaries."
+        ),
+        parameters=[
+            OpenApiParameter(
+                "mine", bool, description="Assigned to me or others/unassigned."
+            ),
+            OpenApiParameter(
+                "requested_by_me", bool, description="Requester is current tenant user."
+            ),
+            OpenApiParameter("closed", bool, description="Closed/terminal or active."),
+            OpenApiParameter("priority", str, enum=["low", "normal", "high", "urgent"]),
+            OpenApiParameter("assignee", str, enum=["unassigned"]),
+            OpenApiParameter(
+                "sort",
+                str,
+                enum=["-updated_at", "updated_at"],
+                description="Defaults to -updated_at; request ID breaks ties.",
+            ),
+        ],
+        responses=RequestListSerializer(many=True),
+    )
+)
 class RequestViewSet(BaseTenantViewSet):
     queryset = Request.objects.all().order_by("-updatedat")
     serializer_class = RequestSerializer
 
     def get_queryset(self):
-        return (
+        queryset = (
             super()
             .get_queryset()
             .select_related("flowid", "statusid", "requesterid", "assigneeid")
         )
+        if self.action != "list":
+            return queryset
+
+        filters = RequestListFilterSerializer(data=self.request.query_params)
+        filters.is_valid(raise_exception=True)
+        values = filters.validated_data
+        if "mine" in values or values.get("requested_by_me"):
+            try:
+                rt_user, _ = resolve_tenant_user(
+                    self.request.user, self.request.tenant_id
+                )
+            except AdminPermissionError as exc:
+                raise PermissionDenied(
+                    "Tenant user context required for this filter."
+                ) from exc
+            if values.get("mine") is True:
+                queryset = queryset.filter(assigneeid_id=rt_user.userid)
+            elif values.get("mine") is False:
+                queryset = queryset.filter(
+                    Q(assigneeid__isnull=True) | ~Q(assigneeid_id=rt_user.userid)
+                )
+            if values.get("requested_by_me"):
+                queryset = queryset.filter(requesterid_id=rt_user.userid)
+        if "closed" in values:
+            closed = Q(statusid__category__iexact="closed") | Q(
+                statusid__isterminal=True
+            )
+            queryset = queryset.filter(closed if values["closed"] else ~closed)
+        if "priority" in values:
+            queryset = queryset.filter(priority=values["priority"])
+        if values.get("assignee") == "unassigned":
+            queryset = queryset.filter(assigneeid__isnull=True)
+        ordering = "updatedat" if values.get("sort") == "updated_at" else "-updatedat"
+        return queryset.order_by(ordering, "requestid")
 
     def get_serializer_class(self):
+        if self.action == "list":
+            return RequestListSerializer
         if self.action in {"retrieve", "detail_bundle"}:
             return RequestDetailSerializer
         return super().get_serializer_class()
