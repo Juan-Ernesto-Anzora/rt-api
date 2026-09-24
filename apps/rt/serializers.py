@@ -176,6 +176,36 @@ class UserLookupSerializer(serializers.ModelSerializer):
         fields = ["user_id", "display_name", "email"]
 
 
+class RequestListSerializer(RequestSerializer):
+    status = StatusSummarySerializer(source="statusid", read_only=True)
+    requester = UserLookupSerializer(source="requesterid", read_only=True)
+    assignee = UserLookupSerializer(
+        source="assigneeid", read_only=True, allow_null=True
+    )
+    flow = FlowLookupSerializer(source="flowid", read_only=True)
+
+    class Meta(RequestSerializer.Meta):
+        fields = RequestSerializer.Meta.fields + [
+            "status",
+            "requester",
+            "assignee",
+            "flow",
+        ]
+
+
+class RequestListFilterSerializer(serializers.Serializer):
+    mine = serializers.BooleanField(required=False)
+    requested_by_me = serializers.BooleanField(required=False)
+    closed = serializers.BooleanField(required=False)
+    priority = serializers.ChoiceField(
+        choices=("low", "normal", "high", "urgent"), required=False
+    )
+    assignee = serializers.ChoiceField(choices=("unassigned",), required=False)
+    sort = serializers.ChoiceField(
+        choices=("-updated_at", "updated_at"), required=False
+    )
+
+
 class TransitionLookupSerializer(serializers.ModelSerializer):
     transition_id = serializers.UUIDField(source="transitionid", read_only=True)
     from_status_id = serializers.UUIDField(source="fromstatusid_id", read_only=True)
