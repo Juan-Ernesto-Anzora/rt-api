@@ -2553,6 +2553,16 @@ class SearchView(APIView):
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
+        description=(
+            "Tenant-scoped Full-Text Search over request title/description, comments "
+            "and attachment filenames. Unicode prefix words are ANDed (first eight). "
+            "Fixed MAX source weights: request=30, comment=20, attachment=10; "
+            "order is rank descending, updated time descending, request ID ascending. "
+            "Count is total matches even on empty/out-of-range pages. Date-only "
+            "from is inclusive day start and to is exclusive next-day start in "
+            "Django TIME_ZONE. Explicit DateTime bounds are inclusive instants. "
+            "Compact summaries reuse the request-list contract; assignee may be null."
+        ),
         parameters=[SearchQuerySerializer],
         responses=SearchResponseSerializer,
     )
@@ -2594,6 +2604,8 @@ class SearchView(APIView):
                 created_to=data.get("created_to"),
                 updated_from=data.get("updated_from"),
                 updated_to=data.get("updated_to"),
+                created_to_exclusive=data["created_to_exclusive"],
+                updated_to_exclusive=data["updated_to_exclusive"],
             )
         except SearchValidationError as exc:
             return Response(

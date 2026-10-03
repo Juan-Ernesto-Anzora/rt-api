@@ -1,3 +1,7 @@
+from datetime import datetime, time, timedelta
+
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
@@ -1105,20 +1109,74 @@ class DashboardSummarySerializer(serializers.Serializer):
     unassigned = serializers.IntegerField()
 
 
+class SearchDateTimeField(serializers.DateTimeField):
+    def __init__(self, *, upper=False, **kwargs):
+        self.upper = upper
+        super().__init__(**kwargs)
+
+    def to_internal_value(self, value):
+        if isinstance(value, str) and len(value) == 10:
+            try:
+                day = parse_date(value)
+                if day:
+                    if self.upper:
+                        day += timedelta(days=1)
+                    return timezone.make_aware(
+                        datetime.combine(day, time.min), timezone.get_default_timezone()
+                    )
+            except (ValueError, OverflowError):
+                self.fail("invalid", format="YYYY-MM-DD or ISO 8601 date-time")
+        return super().to_internal_value(value)
+
+
 class SearchQuerySerializer(serializers.Serializer):
-    q = serializers.CharField(max_length=200, trim_whitespace=True)
+    q = serializers.CharField(
+        max_length=200,
+        trim_whitespace=True,
+        help_text="Unicode prefix terms, AND of the first eight words; no Boolean/phrase syntax.",
+    )
     page = serializers.IntegerField(required=False, min_value=1, default=1)
     page_size = serializers.IntegerField(
         required=False, min_value=1, max_value=100, default=25
     )
-    types = serializers.CharField(required=False, allow_blank=True)
+    types = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Comma-separated request,comment,attachment; omitted selects all.",
+    )
     status_id = serializers.UUIDField(required=False)
     assignee_id = serializers.UUIDField(required=False)
     flow_id = serializers.UUIDField(required=False)
-    created_from = serializers.DateTimeField(required=False)
-    created_to = serializers.DateTimeField(required=False)
-    updated_from = serializers.DateTimeField(required=False)
-    updated_to = serializers.DateTimeField(required=False)
+    created_from = SearchDateTimeField(
+        required=False,
+        help_text="Date: inclusive day start in Django TIME_ZONE; DateTime: inclusive instant.",
+    )
+    created_to = SearchDateTimeField(
+        required=False,
+        upper=True,
+        help_text="Date: exclusive next-day start in Django TIME_ZONE; DateTime: inclusive instant.",
+    )
+    updated_from = SearchDateTimeField(
+        required=False,
+        help_text="Date: inclusive day start in Django TIME_ZONE; DateTime: inclusive instant.",
+    )
+    updated_to = SearchDateTimeField(
+        required=False,
+        upper=True,
+        help_text="Date: exclusive next-day start in Django TIME_ZONE; DateTime: inclusive instant.",
+    )
+
+    def validate(self, attrs):
+        for prefix in ("created", "updated"):
+            lower, upper = attrs.get(f"{prefix}_from"), attrs.get(f"{prefix}_to")
+            raw_upper = self.initial_data.get(f"{prefix}_to", "")
+            exclusive = isinstance(raw_upper, str) and len(raw_upper) == 10
+            if lower and upper and (lower > upper or (exclusive and lower == upper)):
+                raise serializers.ValidationError(
+                    {f"{prefix}_to": ["Must be on or after the from bound."]}
+                )
+            attrs[f"{prefix}_to_exclusive"] = exclusive
+        return attrs
 
 
 class SearchResultSerializer(serializers.Serializer):
@@ -1132,7 +1190,13 @@ class SearchResultSerializer(serializers.Serializer):
     created_at = serializers.DateTimeField()
     updated_at = serializers.DateTimeField()
     rank = serializers.IntegerField()
-    match_sources = serializers.ListField(child=serializers.CharField())
+    match_sources = serializers.ListField(
+        child=serializers.ChoiceField(choices=("request", "comment", "attachment"))
+    )
+    status = StatusSummarySerializer()
+    requester = UserLookupSerializer()
+    assignee = UserLookupSerializer(allow_null=True)
+    flow = FlowLookupSerializer()
 
 
 class SearchResponseSerializer(serializers.Serializer):
