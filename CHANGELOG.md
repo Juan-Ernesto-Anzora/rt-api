@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+- Unified Search now includes compact status, requester, assignee and flow
+  summaries without per-result Detail reads. Existing fields remain available.
+- Search totals remain correct on empty pages; tied results use stable request
+  ID ordering. Date-only ranges include whole days in the API timezone.
+
 ## [0.2.0] - 2026-08-22
 
 ### Added

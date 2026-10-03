@@ -1,6 +1,15 @@
 import re
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import connection
+from rest_framework.exceptions import APIException
+
+from .models import Request
+from .serializers import (
+    FlowLookupSerializer,
+    StatusSummarySerializer,
+    UserLookupSerializer,
+)
 
 MAX_SEARCH_TERMS = 8
 MAX_PAGE_SIZE = 100
@@ -9,6 +18,12 @@ SEARCH_TYPES = {"request", "comment", "attachment"}
 
 class SearchValidationError(ValueError):
     pass
+
+
+class SearchMetadataError(APIException):
+    status_code = 500
+    default_detail = "Search result metadata is unavailable."
+    default_code = "server_error"
 
 
 def normalize_search_types(value):
@@ -53,6 +68,8 @@ def search_requests(
     created_to=None,
     updated_from=None,
     updated_to=None,
+    created_to_exclusive=False,
+    updated_to_exclusive=False,
 ):
     page = max(int(page), 1)
     page_size = min(max(int(page_size), 1), MAX_PAGE_SIZE)
@@ -67,6 +84,8 @@ def search_requests(
         created_to=created_to,
         updated_from=updated_from,
         updated_to=updated_to,
+        created_to_exclusive=created_to_exclusive,
+        updated_to_exclusive=updated_to_exclusive,
     )
 
     selects = []
@@ -146,7 +165,7 @@ def search_requests(
         )
         params.extend([str(tenant_id), fts_query, *filter_params])
 
-    sql = f"""
+    cte = f"""
     ;WITH matched AS (
         {" UNION ALL ".join(selects)}
     ),
@@ -175,6 +194,10 @@ def search_requests(
             CreatedAt,
             UpdatedAt
     )
+    """
+    sql = (
+        cte
+        + """
     SELECT
         RequestId,
         HumanId,
@@ -186,24 +209,25 @@ def search_requests(
         CreatedAt,
         UpdatedAt,
         Rank,
-        MatchSources,
-        COUNT(*) OVER() AS TotalCount
+        MatchSources
     FROM grouped
-    ORDER BY Rank DESC, UpdatedAt DESC
+    ORDER BY Rank DESC, UpdatedAt DESC, RequestId ASC
     OFFSET %s ROWS FETCH NEXT %s ROWS ONLY;
     """
-    params.extend([offset, page_size])
-
+    )
     with connection.cursor() as cursor:
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
+        cursor.execute(cte + "SELECT COUNT(*) FROM grouped;", params)
+        total = int(cursor.fetchone()[0])
+        rows = []
+        if offset < total:
+            cursor.execute(sql, [*params, offset, page_size])
+            rows = cursor.fetchall()
 
-    total = int(rows[0][11]) if rows else 0
     return {
         "count": total,
         "page": page,
         "page_size": page_size,
-        "results": [serialize_search_row(row) for row in rows],
+        "results": hydrate_search_rows(rows, tenant_id),
     }
 
 
@@ -216,6 +240,8 @@ def build_request_filters(
     created_to=None,
     updated_from=None,
     updated_to=None,
+    created_to_exclusive=False,
+    updated_to_exclusive=False,
 ):
     filters = []
     params = []
@@ -230,21 +256,23 @@ def build_request_filters(
         params.append(str(flow_id))
     if created_from:
         filters.append("AND r.CreatedAt >= %s")
-        params.append(created_from)
+        params.append(connection.ops.adapt_datetimefield_value(created_from))
     if created_to:
-        filters.append("AND r.CreatedAt <= %s")
-        params.append(created_to)
+        operator = "<" if created_to_exclusive else "<="
+        filters.append(f"AND r.CreatedAt {operator} %s")
+        params.append(connection.ops.adapt_datetimefield_value(created_to))
     if updated_from:
         filters.append("AND r.UpdatedAt >= %s")
-        params.append(updated_from)
+        params.append(connection.ops.adapt_datetimefield_value(updated_from))
     if updated_to:
-        filters.append("AND r.UpdatedAt <= %s")
-        params.append(updated_to)
+        operator = "<" if updated_to_exclusive else "<="
+        filters.append(f"AND r.UpdatedAt {operator} %s")
+        params.append(connection.ops.adapt_datetimefield_value(updated_to))
     return "\n              ".join(filters), params
 
 
 def serialize_search_row(row):
-    match_sources = sorted({item for item in row[10].split(",") if item})
+    match_sources = sorted(set(row[10].split(",")) & SEARCH_TYPES)
     return {
         "request_id": str(row[0]),
         "human_id": row[1],
@@ -258,3 +286,53 @@ def serialize_search_row(row):
         "rank": row[9],
         "match_sources": match_sources,
     }
+
+
+def hydrate_search_rows(rows, tenant_id):
+    if not rows:
+        return []
+    requests = Request.objects.filter(
+        tenantid_id=tenant_id, requestid__in=[row[0] for row in rows]
+    ).select_related("statusid", "requesterid", "assigneeid", "flowid")
+    by_id = {str(item.requestid).lower(): item for item in requests}
+    results = []
+    for row in rows:
+        item = by_id.get(str(row[0]).lower())
+        if item is None:
+            continue
+        try:
+            flow, status, requester, assignee = (
+                item.flowid,
+                item.statusid,
+                item.requesterid,
+                item.assigneeid,
+            )
+        except ObjectDoesNotExist as exc:
+            raise SearchMetadataError() from exc
+        if (
+            flow is None
+            or status is None
+            or requester is None
+            or (item.assigneeid_id and assignee is None)
+        ):
+            raise SearchMetadataError()
+        expected_tenant = str(tenant_id).lower()
+        if (
+            any(
+                str(value).lower() != expected_tenant
+                for value in (item.tenantid_id, flow.tenantid_id, status.tenantid_id)
+            )
+            or item.statusid.flowid_id != item.flowid_id
+        ):
+            raise SearchMetadataError()
+        result = serialize_search_row(row)
+        result.update(
+            status=StatusSummarySerializer(status).data,
+            requester=UserLookupSerializer(requester).data,
+            assignee=(
+                UserLookupSerializer(assignee).data if item.assigneeid_id else None
+            ),
+            flow=FlowLookupSerializer(flow).data,
+        )
+        results.append(result)
+    return results
