@@ -10,6 +10,7 @@ from apps.rt.models import Flow, Request, Status, Tenant, Transition, User
 from apps.rt.serializers import (
     RequestCloseReopenSerializer,
     RequestTransitionSerializer,
+    StatusSummarySerializer,
     TransitionLookupSerializer,
 )
 from apps.rt.views import (
@@ -128,10 +129,14 @@ def test_available_transitions_filters_current_flow_and_status(monkeypatch):
     transitions = get_available_transitions(rt_request)
 
     assert transitions is fake_qs
-    assert fake_qs.select_related_args == ("tostatusid",)
+    assert fake_qs.select_related_args == ("tostatusid", "fromstatusid")
     assert captured == {
         "flowid": rt_request.flowid_id,
         "fromstatusid": rt_request.statusid_id,
+        "flowid__tenantid": rt_request.tenantid_id,
+        "fromstatusid__tenantid": rt_request.tenantid_id,
+        "tostatusid__tenantid": rt_request.tenantid_id,
+        "tostatusid__flowid": rt_request.flowid_id,
     }
 
 
@@ -194,22 +199,36 @@ def test_apply_transition_updates_status_comment_and_activity(monkeypatch):
     )
 
     apply_transition_without_transaction = apply_transition.__wrapped__
+    actor = User(userid=uuid.uuid4())
+    monkeypatch.setattr(
+        "apps.rt.views.Request.objects.select_for_update",
+        lambda: SimpleNamespace(
+            select_related=lambda *args: SimpleNamespace(
+                get=lambda **kwargs: rt_request
+            )
+        ),
+    )
     updated_request = apply_transition_without_transaction(
         rt_request,
         transition,
         action_type="request.closed",
         comment="Closing this out.",
+        actor=actor,
     )
 
     assert updated_request.statusid == transition.tostatusid
     assert saved == {"update_fields": ["statusid", "updatedat"]}
     assert created_comments[0].messagemd == "Closing this out."
+    assert created_comments[0].authorid == actor
+    assert created_activities[0]["actorid"] == actor
     assert created_activities[0]["type"] == "request.closed"
     assert created_activities[0]["createdat"] == updated_request.updatedat
     assert json.loads(created_activities[0]["payload"]) == {
         "transition_id": str(transition.transitionid),
         "from_status_id": str(transition.fromstatusid_id),
         "to_status_id": str(transition.tostatusid_id),
+        "from_status": StatusSummarySerializer(transition.fromstatusid).data,
+        "to_status": StatusSummarySerializer(transition.tostatusid).data,
         "comment_id": str(created_comments[0].commentid),
     }
 
@@ -242,10 +261,17 @@ def test_reopen_action_uses_open_transition(monkeypatch):
     )
     monkeypatch.setattr(
         "apps.rt.views.apply_transition",
-        lambda rt_request, transition, action_type, comment="": rt_request,
+        lambda rt_request, transition, action_type, comment="", actor=None: rt_request,
     )
     view = RequestViewSet()
-    view.request = SimpleNamespace(tenant_id=rt_request.tenantid_id, data={})
+    view.request = SimpleNamespace(
+        tenant_id=rt_request.tenantid_id,
+        data={},
+        rt_workspace_context=SimpleNamespace(
+            actor=rt_request.requesterid,
+            permissions=["requests.read", "requests.transition"],
+        ),
+    )
     view.get_object = lambda: rt_request
 
     response = view.reopen(view.request, pk=str(rt_request.requestid))

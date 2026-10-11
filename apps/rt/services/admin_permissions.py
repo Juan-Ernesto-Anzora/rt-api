@@ -15,6 +15,11 @@ NOTIFICATIONS_MANAGE_PERMISSION = "notifications.manage"
 SLA_MANAGE_PERMISSION = "sla.manage"
 REPORTS_READ_PERMISSION = "reports.read"
 REPORTS_EXPORT_PERMISSION = "reports.export"
+REQUESTS_READ_PERMISSION = "requests.read"
+REQUESTS_WRITE_PERMISSION = "requests.write"
+REQUESTS_TRANSITION_PERMISSION = "requests.transition"
+COMMENTS_WRITE_PERMISSION = "comments.write"
+ATTACHMENTS_WRITE_PERMISSION = "attachments.write"
 
 
 class AdminPermissionError(Exception):
@@ -38,6 +43,7 @@ class AdminContext:
     user: AdminUserContext
     roles: list[str]
     permissions: list[str]
+    actor: User | None = None
 
     @property
     def is_admin(self):
@@ -69,6 +75,7 @@ def get_admin_context(request, required_permission=ADMIN_ACCESS_PERMISSION):
         ),
         roles=roles,
         permissions=permissions,
+        actor=rt_user,
     )
     if required_permission and required_permission not in permissions:
         raise permission_denied()
@@ -105,7 +112,8 @@ def resolve_request_user(auth_user):
 
 def resolve_membership_permissions(membership):
     role_links = Membershiprole.objects.filter(
-        membershipid_id=membership.membershipid
+        membershipid_id=membership.membershipid,
+        roleid__tenantid_id=membership.tenantid_id,
     ).select_related("roleid")
     role_names = sorted({link.roleid.name for link in role_links})
     role_ids = [link.roleid_id for link in role_links]

@@ -84,6 +84,14 @@ class RequestSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"tenant": ["Tenant context missing."]})
 
         instance = getattr(self, "instance", None)
+        if (
+            instance is not None
+            and "statusid_id" in attrs
+            and attrs["statusid_id"] != instance.statusid_id
+        ):
+            raise serializers.ValidationError(
+                {"status_id": ["Use a workflow transition to change status."]}
+            )
         missing = object()
         flow_id = attrs.get("flowid_id", getattr(instance, "flowid_id", None))
         status_id = attrs.get("statusid_id", getattr(instance, "statusid_id", None))
@@ -103,8 +111,9 @@ class RequestSerializer(serializers.ModelSerializer):
                 {"status_id": ["Status must belong to the selected flow."]}
             )
 
-        self._validate_user_membership("requester_id", requester_id, tenant_id)
-        if assignee_id:
+        if instance is None or "requesterid_id" in attrs:
+            self._validate_user_membership("requester_id", requester_id, tenant_id)
+        if assignee_id and (instance is None or "assigneeid_id" in attrs):
             self._validate_user_membership("assignee_id", assignee_id, tenant_id)
         return attrs
 
@@ -117,11 +126,24 @@ class RequestSerializer(serializers.ModelSerializer):
             ) from exc
 
     def _validate_user_membership(self, public_field, user_id, tenant_id):
-        if not Membership.objects.filter(
-            userid_id=user_id, tenantid_id=tenant_id
-        ).exists():
+        lookup = {"userid_id": user_id, "tenantid_id": tenant_id}
+        if (
+            public_field == "assignee_id"
+            and self.instance is not None
+            and user_id != self.instance.assigneeid_id
+        ):
+            lookup["userid__isactive"] = True
+        if not Membership.objects.filter(**lookup).exists():
             raise serializers.ValidationError(
-                {public_field: ["User is not a member of this tenant."]}
+                {
+                    public_field: [
+                        (
+                            "User is not an eligible member of this tenant."
+                            if "userid__isactive" in lookup
+                            else "User is not a member of this tenant."
+                        )
+                    ]
+                }
             )
 
 
@@ -215,10 +237,23 @@ class TransitionLookupSerializer(serializers.ModelSerializer):
     from_status_id = serializers.UUIDField(source="fromstatusid_id", read_only=True)
     to_status_id = serializers.UUIDField(source="tostatusid_id", read_only=True)
     to_status = StatusLookupSerializer(source="tostatusid", read_only=True)
+    from_status = StatusLookupSerializer(source="fromstatusid", read_only=True)
+    is_terminal = serializers.BooleanField(
+        source="tostatusid.isterminal", read_only=True
+    )
+    label = serializers.CharField(source="tostatusid.name", read_only=True)
 
     class Meta:
         model = Transition
-        fields = ["transition_id", "from_status_id", "to_status_id", "to_status"]
+        fields = [
+            "transition_id",
+            "from_status_id",
+            "to_status_id",
+            "to_status",
+            "from_status",
+            "is_terminal",
+            "label",
+        ]
 
 
 class RequestTransitionSerializer(serializers.Serializer):
@@ -236,16 +271,21 @@ class RequestDetailSerializer(serializers.ModelSerializer):
     flow = FlowSummarySerializer(source="flowid", read_only=True)
     status = StatusSummarySerializer(source="statusid", read_only=True)
     requester = UserSummarySerializer(source="requesterid", read_only=True)
-    assignee = UserSummarySerializer(source="assigneeid", read_only=True)
+    assignee = UserSummarySerializer(
+        source="assigneeid", read_only=True, allow_null=True
+    )
     flow_id = serializers.UUIDField(source="flowid_id", read_only=True)
     status_id = serializers.UUIDField(source="statusid_id", read_only=True)
     requester_id = serializers.UUIDField(source="requesterid_id", read_only=True)
-    assignee_id = serializers.UUIDField(source="assigneeid_id", read_only=True)
+    assignee_id = serializers.UUIDField(
+        source="assigneeid_id", read_only=True, allow_null=True
+    )
     custom_fields = serializers.CharField(source="customfields", read_only=True)
     due_at = serializers.DateTimeField(source="dueat", read_only=True)
     created_at = serializers.DateTimeField(source="createdat", read_only=True)
     updated_at = serializers.DateTimeField(source="updatedat", read_only=True)
     tags = serializers.SerializerMethodField()
+    capabilities = serializers.SerializerMethodField()
 
     class Meta:
         model = Request
@@ -268,11 +308,42 @@ class RequestDetailSerializer(serializers.ModelSerializer):
             "due_at",
             "created_at",
             "updated_at",
+            "capabilities",
         ]
 
     @extend_schema_field(serializers.ListField(child=serializers.CharField()))
     def get_tags(self, obj):
         return []
+
+    @extend_schema_field(
+        {
+            "type": "object",
+            "properties": {
+                key: {"type": "boolean"}
+                for key in (
+                    "can_comment",
+                    "can_upload",
+                    "can_assign",
+                    "can_transition",
+                    "can_download_attachments",
+                )
+            },
+        }
+    )
+    def get_capabilities(self, obj):
+        return self.context.get(
+            "capabilities",
+            {
+                key: False
+                for key in (
+                    "can_comment",
+                    "can_upload",
+                    "can_assign",
+                    "can_transition",
+                    "can_download_attachments",
+                )
+            },
+        )
 
 
 class CommentSerializer(serializers.ModelSerializer):
@@ -280,6 +351,9 @@ class CommentSerializer(serializers.ModelSerializer):
     message = serializers.CharField(source="messagemd", read_only=True)
     visibility = serializers.CharField(required=False, allow_blank=True)
     messagemd = serializers.CharField(required=False, allow_blank=True)
+    comment_id = serializers.UUIDField(source="commentid", read_only=True)
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+    author = UserLookupSerializer(source="authorid", read_only=True)
 
     class Meta:
         model = Comment
@@ -292,6 +366,9 @@ class CommentSerializer(serializers.ModelSerializer):
             "body",
             "visibility",
             "createdat",
+            "comment_id",
+            "created_at",
+            "author",
         ]
         read_only_fields = ["commentid", "requestid", "authorid", "createdat"]
 
@@ -301,25 +378,65 @@ class CommentSerializer(serializers.ModelSerializer):
             attrs["messagemd"] = body
         attrs.setdefault("messagemd", "")
         attrs.setdefault("visibility", "public")
+        if attrs["visibility"] != "public":
+            raise serializers.ValidationError(
+                {"visibility": ["Only public comments are supported."]}
+            )
         return attrs
 
 
-class AttachmentSerializer(serializers.ModelSerializer):
+class WorkspaceAttachmentSerializer(serializers.ModelSerializer):
+    attachment_id = serializers.UUIDField(source="attachmentid", read_only=True)
+    content_type = serializers.CharField(
+        source="contenttype", read_only=True, allow_null=True
+    )
+    size_bytes = serializers.IntegerField(
+        source="sizebytes", read_only=True, allow_null=True
+    )
+    scan_status = serializers.CharField(
+        source="scanstatus", read_only=True, allow_null=True
+    )
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+    comment_id = serializers.UUIDField(
+        source="commentid_id", read_only=True, allow_null=True
+    )
+    group_id = serializers.UUIDField(source="groupid", read_only=True, allow_null=True)
+
     class Meta:
         model = Attachment
         fields = [
-            "attachmentid",
-            "requestid",
-            "commentid",
-            "groupid",
+            "attachment_id",
             "filename",
-            "contenttype",
-            "sizebytes",
-            "storageurl",
-            "checksum",
-            "scanstatus",
-            "createdat",
+            "content_type",
+            "size_bytes",
+            "scan_status",
+            "created_at",
+            "comment_id",
+            "group_id",
         ]
+
+
+class AttachmentSerializer(WorkspaceAttachmentSerializer):
+    class Meta:
+        model = Attachment
+        fields = list(
+            dict.fromkeys(
+                [
+                    "attachmentid",
+                    "requestid",
+                    "commentid",
+                    "groupid",
+                    "filename",
+                    "contenttype",
+                    "sizebytes",
+                    "storageurl",
+                    "checksum",
+                    "scanstatus",
+                    "createdat",
+                ]
+                + WorkspaceAttachmentSerializer.Meta.fields
+            )
+        )
         read_only_fields = ["attachmentid", "createdat"]
 
 
@@ -327,7 +444,12 @@ class AttachmentInitFileSerializer(serializers.Serializer):
     filename = serializers.CharField(max_length=255)
     content_type = serializers.CharField(max_length=100)
     size_bytes = serializers.IntegerField(required=False, min_value=0)
-    checksum = serializers.CharField(required=False, allow_blank=True)
+    checksum = serializers.CharField(required=False, allow_blank=True, max_length=128)
+
+    def validate_content_type(self, value):
+        if any(character in value for character in ("\r", "\n", "\x00")):
+            raise serializers.ValidationError("Invalid content type.")
+        return value
 
 
 class AttachmentInitRequestSerializer(serializers.Serializer):
@@ -350,6 +472,7 @@ class AttachmentInitResponseSerializer(serializers.Serializer):
     request_id = serializers.UUIDField()
     group_id = serializers.UUIDField()
     uploads = PresignedUploadSerializer(many=True)
+    expires_at = serializers.DateTimeField(required=False)
 
 
 class AttachmentFinalizeFileSerializer(serializers.Serializer):
@@ -359,7 +482,7 @@ class AttachmentFinalizeFileSerializer(serializers.Serializer):
         max_length=100, required=False, allow_blank=True
     )
     size_bytes = serializers.IntegerField(required=False, min_value=0)
-    checksum = serializers.CharField(required=False, allow_blank=True)
+    checksum = serializers.CharField(required=False, allow_blank=True, max_length=128)
 
 
 class AttachmentFinalizeRequestSerializer(serializers.Serializer):
@@ -393,9 +516,76 @@ class AttachmentFinalizeRequestSerializer(serializers.Serializer):
 
 
 class ActivitySerializer(serializers.ModelSerializer):
+    activity_id = serializers.UUIDField(source="activityid", read_only=True)
+    created_at = serializers.DateTimeField(source="createdat", read_only=True)
+    actor = UserLookupSerializer(source="actorid", read_only=True, allow_null=True)
+
     class Meta:
         model = Activity
-        fields = ["activityid", "requestid", "actorid", "type", "payload", "createdat"]
+        fields = [
+            "activityid",
+            "requestid",
+            "actorid",
+            "type",
+            "payload",
+            "createdat",
+            "activity_id",
+            "created_at",
+            "actor",
+        ]
+
+
+class TimelineCommentSerializer(serializers.Serializer):
+    comment_id = serializers.UUIDField()
+    body = serializers.CharField(allow_blank=True)
+    visibility = serializers.CharField()
+    created_at = serializers.DateTimeField()
+    author = UserLookupSerializer()
+
+
+class TimelineEventSerializer(serializers.Serializer):
+    event_id = serializers.CharField()
+    kind = serializers.ChoiceField(
+        choices=(
+            "request_created",
+            "comment",
+            "attachments",
+            "assignment",
+            "transition",
+            "request_closed",
+            "request_reopened",
+            "system",
+        )
+    )
+    activity_type = serializers.CharField(allow_null=True)
+    created_at = serializers.DateTimeField()
+    actor = UserLookupSerializer(allow_null=True)
+    summary = serializers.CharField()
+    comment = TimelineCommentSerializer(allow_null=True)
+    attachments = WorkspaceAttachmentSerializer(many=True)
+    from_status = StatusSummarySerializer(allow_null=True)
+    to_status = StatusSummarySerializer(allow_null=True)
+    old_assignee = UserLookupSerializer(allow_null=True)
+    new_assignee = UserLookupSerializer(allow_null=True)
+
+
+class TimelineQuerySerializer(serializers.Serializer):
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    page_size = serializers.IntegerField(
+        required=False, min_value=1, max_value=100, default=25
+    )
+
+
+class TimelineResponseSerializer(serializers.Serializer):
+    count = serializers.IntegerField()
+    next = serializers.URLField(allow_null=True)
+    previous = serializers.URLField(allow_null=True)
+    results = TimelineEventSerializer(many=True)
+
+
+class AttachmentDownloadSerializer(serializers.Serializer):
+    url = serializers.URLField()
+    expires_at = serializers.DateTimeField()
 
 
 class AdminUserContextSerializer(serializers.Serializer):

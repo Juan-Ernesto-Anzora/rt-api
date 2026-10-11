@@ -36,6 +36,7 @@ from apps.rt.views import (
     AdminWorkflowStatusDetailView,
     AdminWorkflowTransitionCreateView,
     AdminWorkflowTransitionDetailView,
+    AttachmentDownloadView,
     AttachmentFinalizeView,
     AttachmentInitView,
     AttachmentViewSet,
@@ -247,6 +248,11 @@ request_attachments = AttachmentViewSet.as_view({"get": "list"})
 request_attachments_legacy = LegacyAttachmentViewSet.as_view({"get": "list"})
 
 urlpatterns += [
+    path(
+        "api/requests/<str:request_pk>/attachments/<str:attachment_pk>/download/",
+        AttachmentDownloadView.as_view(),
+        name="request-attachment-download",
+    ),
     path(
         "api/requests/<str:request_pk>/comments",
         request_comments_legacy,
