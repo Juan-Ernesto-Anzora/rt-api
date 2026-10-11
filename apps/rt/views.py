@@ -2,13 +2,12 @@ import json
 import uuid
 from datetime import datetime
 
-import boto3
-from botocore.client import Config
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
 from django.db.models import Case, IntegerField, Prefetch, Q, Value, When
 from django.db.models.expressions import RawSQL
 from django.http import StreamingHttpResponse
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
@@ -18,7 +17,7 @@ from drf_spectacular.utils import (
     extend_schema,
     extend_schema_view,
 )
-from rest_framework import mixins, permissions, status, viewsets
+from rest_framework import mixins, permissions, serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -73,6 +72,7 @@ from .serializers import (
     AdminUserCreateResponseSerializer,
     AdminUserCreateSerializer,
     AdminUserUpdateSerializer,
+    AttachmentDownloadSerializer,
     AttachmentFinalizeRequestSerializer,
     AttachmentFinalizeResponseSerializer,
     AttachmentInitRequestSerializer,
@@ -98,8 +98,11 @@ from .serializers import (
     SearchQuerySerializer,
     SearchResponseSerializer,
     StatusLookupSerializer,
+    StatusSummarySerializer,
     TenantSettingsResponseSerializer,
     TenantSettingsUpdateSerializer,
+    TimelineQuerySerializer,
+    TimelineResponseSerializer,
     TransitionLookupSerializer,
     UserLookupSerializer,
 )
@@ -135,10 +138,15 @@ from .services.admin_permissions import (
     ADMIN_SETTINGS_PERMISSION,
     ADMIN_USERS_PERMISSION,
     ADMIN_WORKFLOWS_PERMISSION,
+    ATTACHMENTS_WRITE_PERMISSION,
+    COMMENTS_WRITE_PERMISSION,
     FEATURE_FLAGS_MANAGE_PERMISSION,
     NOTIFICATIONS_MANAGE_PERMISSION,
     REPORTS_EXPORT_PERMISSION,
     REPORTS_READ_PERMISSION,
+    REQUESTS_READ_PERMISSION,
+    REQUESTS_TRANSITION_PERMISSION,
+    REQUESTS_WRITE_PERMISSION,
     SLA_MANAGE_PERMISSION,
     TENANT_SETTINGS_MANAGE_PERMISSION,
     AdminPermissionError,
@@ -158,11 +166,31 @@ from .services.report_service import (
     iter_request_csv,
     normalized_audit_filters,
 )
+from .services.request_timeline import timeline_page
+from .services.request_uploads import download_url, finalize_upload, initiate_upload
+from .services.request_workspace import (
+    capabilities,
+    require_comment_text,
+    require_workspace,
+    validate_request_relations,
+    workspace_context,
+)
 from .services.sla_service import (
     create_sla_policy,
     tenant_sla_policy,
     update_sla_policy,
 )
+
+WORKSPACE_TENANT_HEADER = OpenApiParameter(
+    "X-Tenant",
+    str,
+    OpenApiParameter.HEADER,
+    required=True,
+    description="Current tenant code; authenticated RT membership is required.",
+)
+WORKSPACE_ERRORS = {
+    code: ErrorEnvelopeSerializer for code in (400, 401, 403, 404, 409, 503)
+}
 
 
 class TenantPermission(permissions.IsAuthenticated):
@@ -182,6 +210,15 @@ class BaseTenantViewSet(viewsets.ModelViewSet):
 
 
 @extend_schema_view(
+    retrieve=extend_schema(
+        responses={200: RequestDetailSerializer, **WORKSPACE_ERRORS},
+        parameters=[WORKSPACE_TENANT_HEADER],
+        description="Requires requests.read and active tenant membership. Core remains independent of timeline. Capabilities describe base operation eligibility: upload/transition text additionally requires can_comment; individual downloads additionally require scan clean.",
+    ),
+    partial_update=extend_schema(
+        parameters=[WORKSPACE_TENANT_HEADER],
+        description="Requires requests.read and requests.write. Assign a tenant member with assignee_id or null; changed assignment writes one Activity with authenticated actor. Status changes must use transition actions.",
+    ),
     list=extend_schema(
         description=(
             "Tenant-scoped requests. mine=true selects assigned-to-me; mine=false "
@@ -209,11 +246,35 @@ class BaseTenantViewSet(viewsets.ModelViewSet):
             ),
         ],
         responses=RequestListSerializer(many=True),
-    )
+    ),
 )
 class RequestViewSet(BaseTenantViewSet):
     queryset = Request.objects.all().order_by("-updatedat")
     serializer_class = RequestSerializer
+
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        permission = {
+            "retrieve": REQUESTS_READ_PERMISSION,
+            "detail_bundle": REQUESTS_READ_PERMISSION,
+            "activity": REQUESTS_READ_PERMISSION,
+            "activities": REQUESTS_READ_PERMISSION,
+            "timeline": REQUESTS_READ_PERMISSION,
+            "available_transitions": REQUESTS_TRANSITION_PERMISSION,
+            "transition": REQUESTS_TRANSITION_PERMISSION,
+            "close": REQUESTS_TRANSITION_PERMISSION,
+            "reopen": REQUESTS_TRANSITION_PERMISSION,
+            "update": REQUESTS_WRITE_PERMISSION,
+            "partial_update": REQUESTS_WRITE_PERMISSION,
+            "destroy": REQUESTS_WRITE_PERMISSION,
+        }.get(self.action)
+        if permission:
+            require_workspace(request, permission)
+
+    def get_object(self):
+        item = super().get_object()
+        validate_request_relations(item)
+        return item
 
     def get_queryset(self):
         queryset = (
@@ -266,6 +327,8 @@ class RequestViewSet(BaseTenantViewSet):
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context["tenant_id"] = getattr(self.request, "tenant_id", None)
+        if getattr(self.request, "rt_workspace_context", None):
+            context["capabilities"] = capabilities(self.request.rt_workspace_context)
         return context
 
     def create(self, request, *args, **kwargs):
@@ -361,12 +424,40 @@ class RequestViewSet(BaseTenantViewSet):
 
     @transaction.atomic
     def perform_update(self, serializer):
-        instance = serializer.instance
+        actor = require_workspace(self.request, REQUESTS_WRITE_PERMISSION).actor
+        instance = Request.objects.select_for_update().get(
+            requestid=serializer.instance.requestid, tenantid=self.request.tenant_id
+        )
+        serializer.instance = instance
         previous_assignee_id = getattr(instance, "assigneeid_id", None)
+        old_assignee = (
+            UserLookupSerializer(instance.assigneeid).data
+            if previous_assignee_id
+            else None
+        )
         previous_status = getattr(instance, "statusid", None)
 
         rt_request = serializer.save(updatedat=timezone.now())
         current_assignee_id = getattr(rt_request, "assigneeid_id", None)
+        if current_assignee_id != previous_assignee_id:
+            Activity.objects.create(
+                activityid=uuid.uuid4(),
+                tenantid=rt_request.tenantid,
+                requestid=rt_request,
+                actorid=actor,
+                type="request.assigned",
+                createdat=rt_request.updatedat,
+                payload=json.dumps(
+                    {
+                        "old_assignee": old_assignee,
+                        "new_assignee": (
+                            UserLookupSerializer(rt_request.assigneeid).data
+                            if current_assignee_id
+                            else None
+                        ),
+                    }
+                ),
+            )
         if current_assignee_id and current_assignee_id != previous_assignee_id:
             notify_request_assigned(rt_request)
 
@@ -375,30 +466,48 @@ class RequestViewSet(BaseTenantViewSet):
         ):
             notify_request_closed(rt_request)
 
+    @extend_schema(
+        deprecated=True,
+        description="Legacy unpaginated Activity rows. Workspace clients use timeline. Requires requests.read.",
+    )
     @action(detail=True, methods=["get"])
     def activity(self, request, pk=None):
         return self._activity_response(request, pk)
 
+    @extend_schema(
+        deprecated=True,
+        description="Legacy Activity alias; workspace clients use timeline. Requires requests.read.",
+    )
     @action(detail=True, methods=["get"], url_path="activities")
     def activities(self, request, pk=None):
         return self._activity_response(request, pk)
 
+    @extend_schema(
+        deprecated=True,
+        description="Legacy unbounded bundle. Workspace consumers use independent core, timeline and transition reads. Requires requests.read.",
+    )
     @action(detail=True, methods=["get"], url_path="detail")
     def detail_bundle(self, request, pk=None):
         rt_request = self.get_object()
         tenant_id = request.tenant_id
-        comments = Comment.objects.filter(
-            tenantid=tenant_id, requestid=rt_request.requestid
-        ).order_by("-createdat")
+        comments = (
+            Comment.objects.filter(tenantid=tenant_id, requestid=rt_request.requestid)
+            .select_related("authorid")
+            .order_by("-createdat")
+        )
         attachments = Attachment.objects.filter(
             tenantid=tenant_id, requestid=rt_request.requestid
         ).order_by("-createdat")
-        activity = Activity.objects.filter(
-            tenantid=tenant_id, requestid=rt_request.requestid
-        ).order_by("-createdat")
+        activity = (
+            Activity.objects.filter(tenantid=tenant_id, requestid=rt_request.requestid)
+            .select_related("actorid")
+            .order_by("-createdat")
+        )
         return Response(
             {
-                "request": RequestDetailSerializer(rt_request).data,
+                "request": RequestDetailSerializer(
+                    rt_request, context=self.get_serializer_context()
+                ).data,
                 "comments": CommentSerializer(comments, many=True).data,
                 "attachments": AttachmentSerializer(attachments, many=True).data,
                 "activity": ActivitySerializer(activity, many=True).data,
@@ -408,14 +517,50 @@ class RequestViewSet(BaseTenantViewSet):
     def _activity_response(self, request, pk=None):
         rt_request = self.get_object()
         tenant_id = request.tenant_id
-        items = Activity.objects.filter(
-            tenantid=tenant_id, requestid=rt_request.requestid
-        ).order_by("-createdat")
+        items = (
+            Activity.objects.filter(tenantid=tenant_id, requestid=rt_request.requestid)
+            .select_related("actorid")
+            .order_by("-createdat")
+        )
         return Response(ActivitySerializer(items, many=True).data)
 
     @extend_schema(
+        parameters=[TimelineQuerySerializer, WORKSPACE_TENANT_HEADER],
+        responses={200: TimelineResponseSerializer, **WORKSPACE_ERRORS},
+        description="Requires requests.read. Unified semantic events, created_at DESC/event_id ASC; default page_size 25, max 100. Comments referenced by transition/upload Activity are grouped once. Unknown events have neutral text without raw JSON. Out-of-range pages retain count.",
+    )
+    @action(detail=True, methods=["get"], url_path="timeline")
+    def timeline(self, request, pk=None):
+        item = self.get_object()
+        query = TimelineQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        page, size = query.validated_data["page"], query.validated_data["page_size"]
+        count, events = timeline_page(
+            tenant_id=request.tenant_id,
+            request_id=item.requestid,
+            page=page,
+            page_size=size,
+        )
+
+        def link(target):
+            params = request.query_params.copy()
+            params["page"] = str(target)
+            params["page_size"] = str(size)
+            return request.build_absolute_uri(request.path + "?" + params.urlencode())
+
+        return Response(
+            {
+                "count": count,
+                "next": link(page + 1) if page * size < count else None,
+                "previous": link(page - 1) if page > 1 and count else None,
+                "results": events,
+            }
+        )
+
+    @extend_schema(
         responses=TransitionLookupSerializer(many=True),
-        description="List workflow transitions available from the request current status.",
+        parameters=[WORKSPACE_TENANT_HEADER],
+        description="Requires requests.read and requests.transition. Current flow/status and tenant targets only. Label is the target status name, comment is optional. Stored guard JSON/auto rules have no defined runtime semantics and are not interpreted.",
     )
     @action(detail=True, methods=["get"], url_path="available-transitions")
     def available_transitions(self, request, pk=None):
@@ -425,8 +570,9 @@ class RequestViewSet(BaseTenantViewSet):
 
     @extend_schema(
         request=RequestTransitionSerializer,
+        parameters=[WORKSPACE_TENANT_HEADER],
         responses=RequestSerializer,
-        description="Apply a workflow transition to a tenant-scoped request.",
+        description="Requires requests.read and requests.transition. Non-empty optional comment additionally requires comments.write (can_comment). Rechecks current flow/status under a request lock. Comment and Activity use the authenticated RT actor; no requires_comment rule is defined.",
     )
     @action(detail=True, methods=["post"], url_path="transition")
     def transition(self, request, pk=None):
@@ -434,6 +580,7 @@ class RequestViewSet(BaseTenantViewSet):
         if not serializer.is_valid():
             return validation_error_response(serializer.errors)
 
+        require_comment_text(request, serializer.validated_data.get("comment"))
         rt_request = self.get_object()
         try:
             transition = get_available_transitions(rt_request).get(
@@ -459,13 +606,14 @@ class RequestViewSet(BaseTenantViewSet):
             transition=transition,
             action_type="request.transitioned",
             comment=serializer.validated_data.get("comment") or "",
+            actor=workspace_context(request).actor,
         )
         return Response(RequestSerializer(updated_request).data)
 
     @extend_schema(
         request=RequestCloseReopenSerializer,
         responses=RequestSerializer,
-        description="Close a request using an available terminal/closed transition.",
+        description="Requires requests.read and requests.transition. Close using an available terminal/closed transition. Non-empty optional comment additionally requires comments.write.",
     )
     @action(detail=True, methods=["post"], url_path="close")
     def close(self, request, pk=None):
@@ -473,6 +621,7 @@ class RequestViewSet(BaseTenantViewSet):
         if not serializer.is_valid():
             return validation_error_response(serializer.errors)
 
+        require_comment_text(request, serializer.validated_data.get("comment"))
         rt_request = self.get_object()
         transition = find_transition_by_target_category(
             rt_request, categories={"closed"}, terminal=True
@@ -487,13 +636,14 @@ class RequestViewSet(BaseTenantViewSet):
             transition=transition,
             action_type="request.closed",
             comment=serializer.validated_data.get("comment") or "",
+            actor=workspace_context(request).actor,
         )
         return Response(RequestSerializer(updated_request).data)
 
     @extend_schema(
         request=RequestCloseReopenSerializer,
         responses=RequestSerializer,
-        description="Reopen a request using an available open transition.",
+        description="Requires requests.read and requests.transition. Reopen using an available open transition. Non-empty optional comment additionally requires comments.write.",
     )
     @action(detail=True, methods=["post"], url_path="reopen")
     def reopen(self, request, pk=None):
@@ -501,6 +651,7 @@ class RequestViewSet(BaseTenantViewSet):
         if not serializer.is_valid():
             return validation_error_response(serializer.errors)
 
+        require_comment_text(request, serializer.validated_data.get("comment"))
         rt_request = self.get_object()
         transition = find_transition_by_target_category(rt_request, categories={"open"})
         if not transition:
@@ -513,6 +664,7 @@ class RequestViewSet(BaseTenantViewSet):
             transition=transition,
             action_type="request.reopened",
             comment=serializer.validated_data.get("comment") or "",
+            actor=workspace_context(request).actor,
         )
         return Response(RequestSerializer(updated_request).data)
 
@@ -568,6 +720,10 @@ class UserLookupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     permission_classes = [TenantPermission]
     serializer_class = UserLookupSerializer
 
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        require_workspace(request, REQUESTS_READ_PERMISSION)
+
     @extend_schema(
         parameters=[
             OpenApiParameter(
@@ -575,10 +731,16 @@ class UserLookupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
                 description="Optional case-insensitive search by display name or email.",
                 required=False,
                 type=str,
-            )
+            ),
+            OpenApiParameter(
+                "is_active",
+                bool,
+                description="Optional active-state filter; assignment uses true.",
+            ),
+            WORKSPACE_TENANT_HEADER,
         ],
         responses=UserLookupSerializer(many=True),
-        description="List users who belong to the active tenant.",
+        description="Requires requests.read and tenant membership. Paginated tenant users; load lazily for assignment with is_active=true. Omitting is_active preserves the full catalogue.",
     )
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
@@ -598,6 +760,12 @@ class UserLookupViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         if search:
             queryset = queryset.filter(
                 Q(displayname__icontains=search) | Q(email__icontains=search)
+            )
+        if "is_active" in self.request.query_params:
+            queryset = queryset.filter(
+                isactive=serializers.BooleanField().run_validation(
+                    self.request.query_params["is_active"]
+                )
             )
         return queryset
 
@@ -2264,11 +2432,30 @@ class AdminWorkflowTransitionDetailView(AdminWorkflowBaseView):
         return Response(AdminTransitionSerializer(transition).data)
 
 
+@extend_schema_view(
+    list=extend_schema(
+        description="Requires requests.read. Legacy fields plus comment_id, created_at and compact author. Workspace chronology uses timeline."
+    ),
+    create=extend_schema(
+        description="Requires requests.read and comments.write. Body alias accepted; public comments only. Author and Activity actor are the authenticated RT tenant member, never a client author ID."
+    ),
+)
 class CommentViewSet(
     mixins.ListModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet
 ):
     permission_classes = [TenantPermission]
     serializer_class = CommentSerializer
+
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        require_workspace(
+            request,
+            (
+                COMMENTS_WRITE_PERMISSION
+                if self.action == "create"
+                else REQUESTS_READ_PERMISSION
+            ),
+        )
 
     def get_request_uuid(self):
         request_id = self.kwargs.get("request_pk")
@@ -2300,26 +2487,50 @@ class CommentViewSet(
     def get_queryset(self):
         tenant_id = self.request.tenant_id
         request_id = self.get_request_uuid()
-        return Comment.objects.filter(
-            tenantid=tenant_id, requestid=request_id
-        ).order_by("-createdat")
+        require_workspace(self.request, REQUESTS_READ_PERMISSION)
+        self.get_request()
+        return (
+            Comment.objects.filter(tenantid=tenant_id, requestid=request_id)
+            .select_related("authorid")
+            .order_by("-createdat", "commentid")
+        )
 
+    @transaction.atomic
     def perform_create(self, serializer):
         req = self.get_request()
+        actor = require_workspace(self.request, COMMENTS_WRITE_PERMISSION).actor
         comment = serializer.save(
             commentid=uuid.uuid4(),
             tenantid=req.tenantid,
             requestid=req,
-            authorid=req.requesterid,
+            authorid=actor,
             createdat=timezone.now(),
         )
         if comment:
-            notify_comment_added(comment)
+            Activity.objects.create(
+                activityid=uuid.uuid4(),
+                tenantid=req.tenantid,
+                requestid=req,
+                actorid=actor,
+                type="comment.added",
+                createdat=comment.createdat,
+                payload=json.dumps({"comment_id": str(comment.commentid)}),
+            )
+            transaction.on_commit(lambda: notify_comment_added(comment))
 
 
+@extend_schema_view(
+    list=extend_schema(
+        description="Requires requests.read. Paginated inventory retains legacy fields and adds canonical file aliases. Do not use storageurl for downloads; use the clean-only scoped download action."
+    )
+)
 class AttachmentViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     permission_classes = [TenantPermission]
     serializer_class = AttachmentSerializer
+
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        require_workspace(request, REQUESTS_READ_PERMISSION)
 
     def get_request_uuid(self):
         request_id = self.kwargs.get("request_pk")
@@ -2337,6 +2548,8 @@ class AttachmentViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     def get_queryset(self):
         tenant_id = self.request.tenant_id
         request_id = self.get_request_uuid()
+        require_workspace(self.request, REQUESTS_READ_PERMISSION)
+        get_object_or_404(Request, requestid=request_id, tenantid=tenant_id)
         return Attachment.objects.filter(
             tenantid=tenant_id, requestid=request_id
         ).order_by("-createdat")
@@ -2360,83 +2573,19 @@ class AttachmentInitView(APIView):
 
     @extend_schema(
         request=AttachmentInitRequestSerializer,
-        responses=AttachmentInitResponseSerializer,
+        responses={200: AttachmentInitResponseSerializer, **WORKSPACE_ERRORS},
+        parameters=[WORKSPACE_TENANT_HEADER],
+        description="Requires requests.read and attachments.write. Issues a durable one-hour upload group; PUT returned URLs without API authorization.",
     )
     def post(self, request):
+        context = require_workspace(request, ATTACHMENTS_WRITE_PERMISSION)
         serializer = AttachmentInitRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-
-        tenant_id = getattr(request, "tenant_id", None)
-        if not tenant_id:
-            return Response(
-                {
-                    "code": "tenant_required",
-                    "message": "Tenant context missing.",
-                    "details": [],
-                },
-                status=400,
-            )
-
-        try:
-            req = Request.objects.get(requestid=data["request_id"], tenantid=tenant_id)
-        except Request.DoesNotExist:
-            return Response(
-                {
-                    "code": "not_found",
-                    "message": "Request not found for this tenant.",
-                    "details": [],
-                },
-                status=404,
-            )
-
-        group_id = uuid.uuid4()
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=settings.MINIO_ENDPOINT,
-            aws_access_key_id=settings.MINIO_ACCESS_KEY,
-            aws_secret_access_key=settings.MINIO_SECRET_KEY,
-            config=Config(signature_version="s3v4"),
-            region_name=settings.MINIO_REGION,
+        item = get_object_or_404(
+            Request, requestid=data["request_id"], tenantid=request.tenant_id
         )
-
-        uploads = []
-        for file_data in data["files"]:
-            filename = file_data["filename"]
-            content_type = file_data["content_type"]
-            object_key = f"uploads/{group_id}/{uuid.uuid4()}-{filename}"
-            url = s3.generate_presigned_url(
-                "put_object",
-                Params={
-                    "Bucket": settings.MINIO_BUCKET,
-                    "Key": object_key,
-                    "ContentType": content_type,
-                },
-                ExpiresIn=3600,
-            )
-
-            upload = {
-                "filename": filename,
-                "content_type": content_type,
-                "object_key": object_key,
-                "url": url,
-                "method": "PUT",
-                "headers": {"Content-Type": content_type},
-            }
-            if file_data.get("size_bytes") is not None:
-                upload["size_bytes"] = file_data["size_bytes"]
-            if file_data.get("checksum"):
-                upload["checksum"] = file_data["checksum"]
-            uploads.append(upload)
-
-        response = AttachmentInitResponseSerializer(
-            {
-                "request_id": req.requestid,
-                "group_id": group_id,
-                "uploads": uploads,
-            }
-        )
-        return Response(response.data)
+        return Response(initiate_upload(item, data["files"], context.actor))
 
 
 class AttachmentFinalizeView(APIView):
@@ -2444,109 +2593,51 @@ class AttachmentFinalizeView(APIView):
 
     @extend_schema(
         request=AttachmentFinalizeRequestSerializer,
-        responses={201: AttachmentFinalizeResponseSerializer},
+        parameters=[WORKSPACE_TENANT_HEADER],
+        responses={
+            200: AttachmentFinalizeResponseSerializer,
+            201: AttachmentFinalizeResponseSerializer,
+            **WORKSPACE_ERRORS,
+        },
+        description="Requires requests.read and attachments.write at finalize. Non-empty message (including comment_markdown alias) additionally requires comments.write (can_comment); file-only finalize creates an empty structural Comment. Author and Activity actor are the authenticated RT member. Verifies every issued object's HEAD metadata. Group ID is authoritative idempotency identity: first commit 201, equivalent retry 200 with the same IDs, incompatible retry 409. idempotency_key remains accepted.",
     )
-    @transaction.atomic
     def post(self, request):
+        context = require_workspace(request, ATTACHMENTS_WRITE_PERMISSION)
         serializer = AttachmentFinalizeRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-
-        tenant_id = getattr(request, "tenant_id", None)
-        if not tenant_id:
-            return Response(
-                {
-                    "code": "tenant_required",
-                    "message": "Tenant context missing.",
-                    "details": [],
-                },
-                status=400,
-            )
-
-        try:
-            req = Request.objects.get(requestid=data["request_id"], tenantid=tenant_id)
-        except Request.DoesNotExist:
-            return Response(
-                {
-                    "code": "not_found",
-                    "message": "Request not found for this tenant.",
-                    "details": [],
-                },
-                status=404,
-            )
-
-        now = timezone.now()
-        group_id = str(data["group_id"])
-        message = data.get("message") or ""
-
-        # Use the request owner until auth_user -> dbo.User mapping exists.
-        author = req.requesterid
-        comment = Comment.objects.create(
-            commentid=uuid.uuid4(),
-            tenantid=req.tenantid,
-            requestid=req,
-            authorid=author,
-            groupid=group_id,
-            messagemd=message,
-            visibility="public",
-            createdat=now,
+        require_comment_text(request, data["message"])
+        item = get_object_or_404(
+            Request, requestid=data["request_id"], tenantid=request.tenant_id
         )
+        result, created = finalize_upload(item, data, context.actor)
+        return Response(result, status=201 if created else 200)
 
-        attachments = []
-        for file_data in data["files"]:
-            object_key = file_data["object_key"]
-            storage_url = build_storage_url(object_key)
-            attachments.append(
-                Attachment(
-                    attachmentid=uuid.uuid4(),
-                    tenantid=req.tenantid,
-                    requestid=req,
-                    commentid=comment,
-                    groupid=group_id,
-                    filename=file_data["filename"],
-                    storageurl=storage_url,
-                    contenttype=file_data.get("content_type") or "",
-                    sizebytes=file_data.get("size_bytes") or 0,
-                    checksum=file_data.get("checksum") or "",
-                    scanstatus="pending",
-                    createdat=now,
-                )
-            )
 
-        Attachment.objects.bulk_create(attachments)
-        Activity.objects.create(
-            activityid=uuid.uuid4(),
-            tenantid=req.tenantid,
-            requestid=req,
-            actorid=author,
-            type="attachments.finalized",
-            payload=json.dumps(
-                {
-                    "comment_id": str(comment.commentid),
-                    "group_id": group_id,
-                    "filenames": [file_data["filename"] for file_data in data["files"]],
-                }
-            ),
-            createdat=now,
+class AttachmentDownloadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={200: AttachmentDownloadSerializer, **WORKSPACE_ERRORS},
+        parameters=[
+            WORKSPACE_TENANT_HEADER,
+            OpenApiParameter("request_pk", OpenApiTypes.UUID, OpenApiParameter.PATH),
+            OpenApiParameter("attachment_pk", OpenApiTypes.UUID, OpenApiParameter.PATH),
+        ],
+        description="Requires requests.read and tenant membership. Only clean attachments receive a 300-second presigned GET URL; pending/blocked return 409 without a URL. Wrong request/tenant IDs return 404.",
+    )
+    def get(self, request, request_pk, attachment_pk):
+        require_workspace(request, REQUESTS_READ_PERMISSION)
+        request_id = serializers.UUIDField().run_validation(request_pk)
+        attachment_id = serializers.UUIDField().run_validation(attachment_pk)
+        get_object_or_404(Request, requestid=request_id, tenantid=request.tenant_id)
+        item = get_object_or_404(
+            Attachment,
+            attachmentid=attachment_id,
+            requestid=request_id,
+            tenantid=request.tenant_id,
         )
-        notify_comment_added(comment)
-
-        return Response(
-            {
-                "request_id": str(req.requestid),
-                "group_id": group_id,
-                "comment_id": str(comment.commentid),
-                "attachments": [
-                    {
-                        "attachment_id": str(attachment.attachmentid),
-                        "filename": attachment.filename,
-                        "storage_url": attachment.storageurl,
-                    }
-                    for attachment in attachments
-                ],
-            },
-            status=201,
-        )
+        return Response(AttachmentDownloadSerializer(download_url(item)).data)
 
 
 class SearchView(APIView):
@@ -2705,7 +2796,11 @@ def get_available_transitions(rt_request):
     return Transition.objects.filter(
         flowid=rt_request.flowid_id,
         fromstatusid=rt_request.statusid_id,
-    ).select_related("tostatusid")
+        flowid__tenantid=rt_request.tenantid_id,
+        fromstatusid__tenantid=rt_request.tenantid_id,
+        tostatusid__tenantid=rt_request.tenantid_id,
+        tostatusid__flowid=rt_request.flowid_id,
+    ).select_related("tostatusid", "fromstatusid")
 
 
 def find_transition_by_target_category(rt_request, categories, terminal=False):
@@ -2730,7 +2825,20 @@ def status_changed_to_closed(previous_status, current_status):
 
 
 @transaction.atomic
-def apply_transition(rt_request, transition, action_type, comment=""):
+def apply_transition(rt_request, transition, action_type, comment="", actor=None):
+    if actor is None:
+        raise PermissionDenied("Authenticated transition actor required.")
+    rt_request = (
+        Request.objects.select_for_update()
+        .select_related("statusid")
+        .get(requestid=rt_request.requestid, tenantid=rt_request.tenantid_id)
+    )
+    if (
+        transition.fromstatusid_id != rt_request.statusid_id
+        or transition.flowid_id != rt_request.flowid_id
+        or transition.tostatusid.tenantid_id != rt_request.tenantid_id
+    ):
+        raise ValidationError({"transition_id": ["Transition is no longer available."]})
     previous_status_id = rt_request.statusid_id
     previous_status = rt_request.statusid
     now = timezone.now()
@@ -2744,7 +2852,7 @@ def apply_transition(rt_request, transition, action_type, comment=""):
             commentid=uuid.uuid4(),
             tenantid=rt_request.tenantid,
             requestid=rt_request,
-            authorid=rt_request.requesterid,
+            authorid=actor,
             messagemd=comment,
             visibility="public",
             createdat=now,
@@ -2754,13 +2862,15 @@ def apply_transition(rt_request, transition, action_type, comment=""):
         activityid=uuid.uuid4(),
         tenantid=rt_request.tenantid,
         requestid=rt_request,
-        actorid=rt_request.requesterid,
+        actorid=actor,
         type=action_type,
         payload=json.dumps(
             {
                 "transition_id": str(transition.transitionid),
                 "from_status_id": str(previous_status_id),
                 "to_status_id": str(transition.tostatusid_id),
+                "from_status": StatusSummarySerializer(previous_status).data,
+                "to_status": StatusSummarySerializer(transition.tostatusid).data,
                 "comment_id": (
                     str(created_comment.commentid) if created_comment else None
                 ),

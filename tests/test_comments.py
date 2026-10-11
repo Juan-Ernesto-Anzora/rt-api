@@ -32,11 +32,12 @@ def test_comment_serializer_accepts_body_alias_and_defaults_visibility():
     assert serializer.validated_data["visibility"] == "public"
 
 
-def test_comment_create_uses_tenant_scoped_request_and_requester(monkeypatch):
+def test_comment_create_uses_tenant_scoped_request_and_authenticated_actor(monkeypatch):
     tenant_id = uuid.uuid4()
     request_id = uuid.UUID(UPPER_REQUEST_ID)
     tenant = Tenant(tenantid=tenant_id)
     requester = User(userid=uuid.uuid4())
+    commenter = User(userid=uuid.uuid4())
     rt_request = Request(
         requestid=request_id,
         tenantid=tenant,
@@ -60,13 +61,18 @@ def test_comment_create_uses_tenant_scoped_request_and_requester(monkeypatch):
 
     monkeypatch.setattr("apps.rt.views.Request.objects.get", fake_get)
     view = CommentViewSet()
-    view.request = SimpleNamespace(tenant_id=tenant_id)
+    view.request = SimpleNamespace(
+        tenant_id=tenant_id,
+        rt_workspace_context=SimpleNamespace(
+            actor=commenter, permissions=["requests.read", "comments.write"]
+        ),
+    )
     view.kwargs = {"request_pk": UPPER_REQUEST_ID}
 
-    view.perform_create(FakeSerializer())
+    view.perform_create.__wrapped__(view, FakeSerializer())
 
     assert captured_get == {"requestid": request_id, "tenantid": tenant_id}
     assert isinstance(captured_save["commentid"], uuid.UUID)
     assert captured_save["tenantid"] == tenant
     assert captured_save["requestid"] == rt_request
-    assert captured_save["authorid"] == requester
+    assert captured_save["authorid"] == commenter

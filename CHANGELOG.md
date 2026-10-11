@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Request workspace adds a bounded semantic timeline, authoritative operation
+  capabilities, authenticated comment/transition actors and assignment audit.
+- Upload finalize verifies issued storage objects and serializes group retries;
+  finalized files use server-only immutable copies. Clean-only downloads use
+  scoped five-minute presigned URLs. Legacy endpoints and fields remain.
+- Optional upload messages and transition/close/reopen notes additionally require
+  comments.write; file-only uploads and note-free actions retain their own grants.
+
 - Unified Search now includes compact status, requester, assignee and flow
   summaries without per-result Detail reads. Existing fields remain available.
 - Search totals remain correct on empty pages; tied results use stable request

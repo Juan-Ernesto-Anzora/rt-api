@@ -146,7 +146,10 @@ def test_admin_context_resolves_roles_and_permissions(monkeypatch):
         "userid_id": user.userid,
         "tenantid_id": tenant.tenantid,
     }
-    assert captured["role_links"] == {"membershipid_id": membership.membershipid}
+    assert captured["role_links"] == {
+        "membershipid_id": membership.membershipid,
+        "roleid__tenantid_id": tenant.tenantid,
+    }
     assert captured["permissions"] == {"roleid_id__in": [role.roleid]}
 
 

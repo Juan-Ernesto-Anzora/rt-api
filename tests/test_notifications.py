@@ -180,7 +180,20 @@ def test_request_update_changed_assignee_triggers_assignment_notification(monkey
         lambda request: None,
     )
 
-    RequestViewSet.perform_update.__wrapped__(RequestViewSet(), FakeSerializer())
+    view = RequestViewSet()
+    view.request = SimpleNamespace(
+        tenant_id=rt_request.tenantid_id,
+        rt_workspace_context=SimpleNamespace(
+            actor=rt_request.requesterid,
+            permissions=["requests.read", "requests.write"],
+        ),
+    )
+    monkeypatch.setattr(
+        "apps.rt.views.Request.objects.select_for_update",
+        lambda: SimpleNamespace(get=lambda **kwargs: rt_request),
+    )
+    monkeypatch.setattr("apps.rt.views.Activity.objects.create", lambda **kwargs: None)
+    RequestViewSet.perform_update.__wrapped__(view, FakeSerializer())
 
     assert assigned == [rt_request]
 
@@ -268,11 +281,20 @@ def test_transition_to_closed_category_triggers_closed_notification(monkeypatch)
         lambda request: notified.append(request),
     )
     apply_transition_without_transaction = apply_transition.__wrapped__
+    monkeypatch.setattr(
+        "apps.rt.views.Request.objects.select_for_update",
+        lambda: SimpleNamespace(
+            select_related=lambda *args: SimpleNamespace(
+                get=lambda **kwargs: rt_request
+            )
+        ),
+    )
 
     apply_transition_without_transaction(
         rt_request,
         transition,
         action_type="request.transitioned",
+        actor=rt_request.requesterid,
     )
 
     assert notified == [rt_request]
